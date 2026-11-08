@@ -71,10 +71,39 @@ __attribute__((constructor(101))) static void reserve_guest_space(void) {
     bdsp_guest_window_error = errno ? errno : -1;
 }
 #else
+#ifdef __APPLE__
+#include <crt_externs.h>
+#include <mach-o/dyld.h>
+#endif
+// macOS 27 places some of a process's first anonymous regions at random addresses, and they can fall inside the window before any
+// constructor runs: malloc's 4 MB regions and at times a 12 GB reservation (a plain test program had one there in 4 of 12 starts; the
+// game failed 2 of 6 starts with "guest window is not free"). The window is fixed (the generated code uses guest address == host address),
+// so on macOS the process starts itself again (fresh random placement) up to 8 times; BDSP_GUEST_WINDOW_TRY counts the starts.
+#define GUEST_WINDOW_STARTS 8
 __attribute__((constructor(101))) static void reserve_guest_space(void) {
     mach_vm_address_t a = GUEST_LO;
-    if (mach_vm_allocate(mach_task_self(), &a, GUEST_HI - GUEST_LO, VM_FLAGS_FIXED) == KERN_SUCCESS) return;
-    fprintf(stderr, "FATAL: guest window %llx-%llx is not free\n", (unsigned long long)GUEST_LO, (unsigned long long)GUEST_HI);
+    const char *t = getenv("BDSP_GUEST_WINDOW_TRY");
+    int starts = t ? atoi(t) : 0;
+    if (mach_vm_allocate(mach_task_self(), &a, GUEST_HI - GUEST_LO, VM_FLAGS_FIXED) == KERN_SUCCESS) {
+        if (t) {
+            fprintf(stderr, "[guestmem] guest window free on start %d\n", starts + 1);
+            unsetenv("BDSP_GUEST_WINDOW_TRY");   // (a later restart of the app starts counting again)
+        }
+        return;
+    }
+#ifdef __APPLE__
+    char path[4096];
+    uint32_t size = sizeof path;
+    if (starts + 1 < GUEST_WINDOW_STARTS && _NSGetExecutablePath(path, &size) == 0) {
+        char n[16];
+        snprintf(n, sizeof n, "%d", starts + 1);
+        setenv("BDSP_GUEST_WINDOW_TRY", n, 1);
+        fprintf(stderr, "[guestmem] guest window %llx-%llx is taken by another region on start %d: starting again\n",
+                (unsigned long long)GUEST_LO, (unsigned long long)GUEST_HI, starts + 1);
+        execv(path, *_NSGetArgv());
+    }
+#endif
+    fprintf(stderr, "FATAL: guest window %llx-%llx is not free (start %d)\n", (unsigned long long)GUEST_LO, (unsigned long long)GUEST_HI, starts + 1);
     _exit(1);
 }
 #endif
