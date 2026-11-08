@@ -36,7 +36,8 @@ static id<MTLTexture> metalfx_prepare(id<MTLDevice> dev, id<MTLTexture> in, doub
     if (ow <= in.width + 1 && oh <= in.height + 1) return nil;
     if (ow > 16384) ow = 16384;
     if (oh > 16384) oh = 16384;
-    if (!g_fx || g_fx_iw != in.width || g_fx_ih != in.height || g_fx_ow != ow || g_fx_oh != oh || g_fx_fmt != in.pixelFormat) {
+    // (set up again only when a size or the format changes: a configuration the scaler refused stays refused, not retried each frame)
+    if (!g_fx_iw || g_fx_iw != in.width || g_fx_ih != in.height || g_fx_ow != ow || g_fx_oh != oh || g_fx_fmt != in.pixelFormat) {
         MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
         d.inputWidth = in.width; d.inputHeight = in.height;
         d.outputWidth = ow; d.outputHeight = oh;

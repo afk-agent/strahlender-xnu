@@ -13,6 +13,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+static int g_log_lines;   // lines metalfx_scale.h logged (one per scaler set-up)
+#define METALFX_LOG(...) (g_log_lines++, fprintf(stderr, __VA_ARGS__))
 #include "metalfx_scale.h"
 
 static int failures;
@@ -215,6 +217,26 @@ int main(int argc, char **argv) {
             free(low.px);
         }
 
+        // Formats a swapchain image may have (as the raw view metal.m passes): which ones the scaler takes. A refused one falls back
+        // to plain sampling and is set up only once, not again every frame.
+        {
+            static const struct { MTLPixelFormat f; const char *name; } fmts[] = {
+                {MTLPixelFormatRGBA8Unorm, "RGBA8Unorm"}, {MTLPixelFormatBGRA8Unorm, "BGRA8Unorm"}, {MTLPixelFormatRGB10A2Unorm, "RGB10A2Unorm"},
+                {MTLPixelFormatRGBA16Float, "RGBA16Float"}, {MTLPixelFormatR8Unorm, "R8Unorm"}};
+            printf("\nformats:");
+            for (unsigned i = 0; i < sizeof fmts / sizeof fmts[0]; i++) {
+                MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmts[i].f width:640 height:360 mipmapped:NO];
+                td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+                id<MTLTexture> t = [dev newTextureWithDescriptor:td];
+                id<MTLTexture> o = metalfx_prepare(dev, t, 1280, 720);
+                printf(" %s %s", fmts[i].name, o ? "ok" : "refused");
+                int lines = g_log_lines;
+                for (int k = 0; k < 3; k++) CHECK(metalfx_prepare(dev, t, 1280, 720) == o, "%s: another answer on the next frame", fmts[i].name);
+                CHECK(g_log_lines == lines, "%s: set up again on the next frames", fmts[i].name);
+            }
+            printf("\n");
+        }
+
         // GPU time of the scaler (median of 40 runs, each its own command buffer) at the sizes the game shows
         static const int sizes[][4] = {
             {1280, 720, 2388, 1343},   // 720p on an 11" iPad Pro / Air (2388x1668 panel, 16:9 picture)
@@ -225,6 +247,22 @@ int main(int argc, char **argv) {
             {1920, 1080, 2560, 1440},
             {1920, 1080, 3456, 1944},  // 1080p on a 16" MacBook Pro panel
         };
+        {   // what a command buffer with one tiny blit costs (start-up of the GPU work; part of every time below)
+            id<MTLTexture> a = upload(dev, ref), b = upload(dev, ref);
+            double t[40];
+            for (int i = 0; i < 40; i++) {
+                id<MTLCommandBuffer> cb = [q commandBuffer];
+                id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+                [bl copyFromTexture:a sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(1, 1, 1)
+                          toTexture:b destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+                [bl endEncoding];
+                [cb commit];
+                [cb waitUntilCompleted];
+                t[i] = (cb.GPUEndTime - cb.GPUStartTime) * 1000;
+            }
+            for (int i = 0; i < 40; i++) for (int j = i + 1; j < 40; j++) if (t[j] < t[i]) { double x = t[i]; t[i] = t[j]; t[j] = x; }
+            printf("\ncommand buffer with a 1-pixel blit: %.3f ms (included in the times below)", t[20]);
+        }
         printf("\nMetalFX GPU time on %s:\n", dev.name.UTF8String);
         for (unsigned s = 0; s < sizeof sizes / sizeof sizes[0]; s++) {
             Img low = reduce(ref, sizes[s][0], sizes[s][1]);
@@ -239,9 +277,15 @@ int main(int argc, char **argv) {
                 t[i] = (cb.GPUEndTime - cb.GPUStartTime) * 1000;
             }
             for (int i = 0; i < 40; i++) for (int j = i + 1; j < 40; j++) if (t[j] < t[i]) { double x = t[i]; t[i] = t[j]; t[j] = x; }
+            // the same 40 back to back in one command buffer: a busy GPU (clocks up, as in the game) rather than one waking per frame
+            id<MTLCommandBuffer> cbb = [q commandBuffer];
+            for (int i = 0; i < 40; i++) metalfx_encode(cbb, in, 5000 + s * 100 + i);
+            [cbb commit];
+            [cbb waitUntilCompleted];
+            double busy = (cbb.GPUEndTime - cbb.GPUStartTime) * 1000 / 40;
             double mp_in = sizes[s][0] * sizes[s][1] / 1e6, mp_out = sizes[s][2] * sizes[s][3] / 1e6;
-            printf("  %4dx%-4d -> %4dx%-4d  %.3f ms  (render %.2f MP instead of %.2f MP: %.0f%% fewer pixels)\n", sizes[s][0], sizes[s][1],
-                   sizes[s][2], sizes[s][3], t[20], mp_in, mp_out, 100 * (1 - mp_in / mp_out));
+            printf("  %4dx%-4d -> %4dx%-4d  %.3f ms alone, %.3f ms back to back  (render %.2f MP instead of %.2f MP: %.0f%% fewer pixels)\n",
+                   sizes[s][0], sizes[s][1], sizes[s][2], sizes[s][3], t[20], busy, mp_in, mp_out, 100 * (1 - mp_in / mp_out));
             free(low.px);
         }
         free(ref.px);

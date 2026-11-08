@@ -1275,12 +1275,6 @@ static bool present_gpu_locked(uint64_t frame, id<MTLTexture> tex, bool has_wc, 
         }
         if (!drawable) return false;
         id<MTLCommandBuffer> cb = [queue commandBuffer];
-        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-        rp.colorAttachments[0].texture = drawable.texture;
-        rp.colorAttachments[0].loadAction = MTLLoadActionClear;
-        rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
-        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         // Next frame's render resolution follows the window: the 1920x1080 image scaled to fit.
         double dw = drawable.texture.width, dh = drawable.texture.height;
         extern void widescreen_frame_end(uint64_t frame);
@@ -1314,33 +1308,26 @@ static bool present_gpu_locked(uint64_t frame, id<MTLTexture> tex, bool has_wc, 
         }
         renderer_set_scale((float)sx, (float)sy);
         extern int swkbd_overlay_backdrop_opaque(unsigned long w, unsigned long h);
-        if (tex && !(repeat && swkbd_overlay_backdrop_opaque((unsigned long)dw, (unsigned long)dh))) {   // (a repeated picture under an opaque keyboard backdrop is not drawn: the blur holds it)
-            id<MTLTexture> src = raw_view(tex);
+        // (a repeated picture under an opaque keyboard backdrop is not drawn: the blur holds it)
+        bool draw = tex && !(repeat && swkbd_overlay_backdrop_opaque((unsigned long)dw, (unsigned long)dh));
+        id<MTLTexture> src = draw ? raw_view(tex) : nil;
+        // The passes that prepare the image run before the drawable's pass, so that pass only clears, draws and stores the drawable
+        // (no store and reload of the whole drawable around them, which costs a tile GPU two full-screen memory passes).
+        if (draw) {
             // SMAA (Video tab "Anti-aliasing"): first, at the game image's size (MetalFX then upscales its result)
-            if (g_settings.antialias == AA_SMAA) {
-                [enc endEncoding];
-                src = smaa_encode(cb, src);
-                MTLRenderPassDescriptor *rp2 = [MTLRenderPassDescriptor renderPassDescriptor];
-                rp2.colorAttachments[0].texture = drawable.texture;
-                rp2.colorAttachments[0].loadAction = MTLLoadActionLoad;
-                rp2.colorAttachments[0].storeAction = MTLStoreActionStore;
-                enc = [cb renderCommandEncoderWithDescriptor:rp2];
-            }
+            if (g_settings.antialias == AA_SMAA) src = smaa_encode(cb, src);
             // MetalFX (setting "upscaler", metalfx_scale.h): when the game image is smaller than its place in the window, Apple's
-            // spatial upscaler brings it to the window's size first (the whole image, so the interior crop below
-            // still applies); the present pass then samples it about 1:1. Its own pass: the drawable's pass is
-            // ended and resumed (load) around it.
-            id<MTLTexture> up = metalfx_upscale(src, vw / crop[2], vh / crop[3]);
-            if (up) {
-                [enc endEncoding];
-                up = metalfx_encode(cb, src, frame);   // (a repeated present reuses the image already scaled)
-                MTLRenderPassDescriptor *rp2 = [MTLRenderPassDescriptor renderPassDescriptor];
-                rp2.colorAttachments[0].texture = drawable.texture;
-                rp2.colorAttachments[0].loadAction = MTLLoadActionLoad;
-                rp2.colorAttachments[0].storeAction = MTLStoreActionStore;
-                enc = [cb renderCommandEncoderWithDescriptor:rp2];
-                src = up;
-            }
+            // spatial upscaler brings it to the window's size first (the whole image, so the interior crop below still applies); the
+            // present pass then samples it about 1:1. A repeated present of the same frame reuses the image already scaled.
+            if (metalfx_upscale(src, vw / crop[2], vh / crop[3])) src = metalfx_encode(cb, src, frame);
+        }
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = drawable.texture;
+        rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+        rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        if (draw) {
             float flip = renderer_origin_lower_left() ? 1.0f : 0.0f;
             [enc setViewport:(MTLViewport){vx, vy, vw, vh, 0, 1}];
             [enc setRenderPipelineState:present_pipe];
