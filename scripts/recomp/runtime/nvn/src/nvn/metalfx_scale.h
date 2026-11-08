@@ -20,7 +20,10 @@ static id<MTLFXSpatialScaler> g_fx;
 static id<MTLTexture> g_fx_out;
 static NSUInteger g_fx_iw, g_fx_ih, g_fx_ow, g_fx_oh;
 static MTLPixelFormat g_fx_fmt;
-static id<MTLTexture> g_fx_last;   // the texture (the view's parent) whose frame g_fx_out holds; nil: none
+// The texture (the view's parent) and frame whose scaled image g_fx_out holds. Only the address is kept, so a released swapchain image is
+// not held alive for this; the frame number makes the pair unique (a repeated present passes a texture metal.m still holds).
+static const void *g_fx_last;
+static int g_fx_logs;                     // set-up lines logged (a window being resized sets the scaler up for every size)
 static uint64_t g_fx_last_frame;
 
 // The image `in` is shown at ow_d x oh_d pixels: sets up the scaler for these sizes and returns its output texture, or nil when
@@ -50,9 +53,10 @@ static id<MTLTexture> metalfx_prepare(id<MTLDevice> dev, id<MTLTexture> in, doub
         td.storageMode = MTLStorageModePrivate;
         g_fx_out = g_fx ? [dev newTextureWithDescriptor:td] : nil;
         g_fx_iw = in.width; g_fx_ih = in.height; g_fx_ow = ow; g_fx_oh = oh; g_fx_fmt = in.pixelFormat;
-        g_fx_last = nil;
-        METALFX_LOG("[metalfx] %lux%lu -> %lux%lu (%s)\n", (unsigned long)in.width, (unsigned long)in.height, (unsigned long)ow,
-                    (unsigned long)oh, g_fx && g_fx_out ? "ok" : "FAILED");
+        g_fx_last = NULL;
+        if (g_fx_logs++ < 40 || !(g_fx && g_fx_out))
+            METALFX_LOG("[metalfx] %lux%lu -> %lux%lu (%s)\n", (unsigned long)in.width, (unsigned long)in.height, (unsigned long)ow,
+                        (unsigned long)oh, g_fx && g_fx_out ? "ok" : "FAILED");
     }
     return g_fx && g_fx_out ? g_fx_out : nil;
 }
@@ -60,7 +64,7 @@ static id<MTLTexture> metalfx_prepare(id<MTLDevice> dev, id<MTLTexture> in, doub
 // Encodes the upscale of `in` (frame `frame`) into cb and returns the upscaled image. A repeated present of the same frame (the
 // display runs faster than the game) reuses the image already in the output instead of scaling it again.
 static id<MTLTexture> metalfx_encode(id<MTLCommandBuffer> cb, id<MTLTexture> in, uint64_t frame) {
-    id<MTLTexture> base = in.parentTexture ? in.parentTexture : in;   // `in` is a fresh format view of the swapchain image each time
+    const void *base = (__bridge const void *)(in.parentTexture ? in.parentTexture : in);   // `in` is a fresh format view each time
     if (g_fx_last && g_fx_last == base && g_fx_last_frame == frame) return g_fx_out;
     g_fx.colorTexture = in;
     g_fx.inputContentWidth = in.width;

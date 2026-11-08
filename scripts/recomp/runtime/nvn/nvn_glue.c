@@ -453,7 +453,8 @@ NPAD_STATES("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj", npad_ss_h
 NPAD_STATES("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", npad_ss_right)
 HLE_FUNC("_ZN2nn3hid15GetNpadStyleSetERKj", npad_style) { c->x[0] = *(uint32_t *)G2HC(c->x[0]) == 0 ? 1 : 0; }  // player 1 only, style "Pro Controller"
 
-// Upscaler of the presented image (settings.h; the backend calls settings_load when it starts): BDSP_UPSCALER=metalfx (also on, 1) runs
+// Upscaler of the presented image (settings.h; the backend calls settings_load when it starts): BDSP_UPSCALER=metalfx (also on, 1, yes, true;
+// any case) runs
 // Apple's MetalFX spatial upscaler when the game's image is smaller than its place on the screen (nvn/metalfx_scale.h), off (default) samples
 // it bilinearly. The shells set the variable from their settings (iPad Settings app; Mac View menu, then config.ini "upscaler"); the Mac menu
 // switches it while the game runs (bdsp_set_upscaler). The Vulkan backend has no MetalFX and ignores the value.
@@ -461,7 +462,11 @@ void bdsp_set_upscaler(int on) { __atomic_store_n(&g_settings.upscaler, on ? UPS
 int bdsp_upscaler(void) { return __atomic_load_n(&g_settings.upscaler, __ATOMIC_RELAXED) == UPSCALE_METALFX; }
 void settings_load(void) {
     const char *u = getenv("BDSP_UPSCALER");
-    if (u) bdsp_set_upscaler(!strcmp(u, "metalfx") || !strcmp(u, "on") || !strcmp(u, "1"));
+    static const char *const on[] = {"metalfx", "on", "1", "yes", "true"};
+    if (!u) return;
+    int v = 0;
+    for (unsigned i = 0; i < sizeof on / sizeof on[0]; i++) v |= !strcasecmp(u, on[i]);
+    bdsp_set_upscaler(v);
 }
 
 // ---- Stubs for hooks of the clone (widescreen, Zelda effects, menu, input, restart within the process)

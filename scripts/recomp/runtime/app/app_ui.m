@@ -318,6 +318,7 @@ void bdsp_app_apply_display_defaults(void) {
 - (void)setUpscaler:(NSMenuItem *)s {
     bdsp_set_upscaler((int)s.tag);
     [[NSUserDefaults standardUserDefaults] setObject:s.tag ? @"metalfx" : @"off" forKey:@"bdsp_upscaler"];
+    setenv("BDSP_UPSCALER", s.tag ? "metalfx" : "off", 1);   // (a restart by exec keeps the environment: the old value must not win there)
 }
 - (void)setFps:(NSMenuItem *)s {
     bdsp_set_fps((int)s.tag);
