@@ -693,11 +693,13 @@ static void StartSelectedRuntime(const ModInfo *mod) {
     setenv("BDSP_FPS_INTERVAL", "5", 0);
     NSInteger fps = [NSUserDefaults.standardUserDefaults integerForKey:@"bdsp_fps"];
     bdsp_set_fps(fps ? (int)fps : 60);
-    {   // Settings > BDSP > Picture: aspect ratio and render height (runtime/display_size.c reads them before the game starts)
+    {   // Settings > BDSP > Picture: aspect ratio, render height (runtime/display_size.c reads them before the game starts) and upscaler
         NSString *aspect = [NSUserDefaults.standardUserDefaults stringForKey:@"bdsp_aspect"];
         NSString *height = [NSUserDefaults.standardUserDefaults stringForKey:@"bdsp_render_h"];
         if (aspect.length) setenv("BDSP_ASPECT", aspect.UTF8String, 0);
         if (height.length) setenv("BDSP_RENDER_H", height.UTF8String, 0);
+        NSString *upscaler = [NSUserDefaults.standardUserDefaults stringForKey:@"bdsp_upscaler"];   // MetalFX (runtime/nvn/nvn_glue.c settings_load)
+        if (upscaler.length) setenv("BDSP_UPSCALER", upscaler.UTF8String, 0);
     }
     fprintf(stderr, "[ipad] Start: %s, device %s, os_proc_available_memory %zu MiB\n", UIDevice.currentDevice.systemVersion.UTF8String,
             UIDevice.currentDevice.model.UTF8String, os_proc_available_memory() >> 20);

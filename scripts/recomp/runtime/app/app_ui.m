@@ -244,6 +244,7 @@ static const char *const k_default_config =
     "# backups = 10              # number of backups at start\n"
     "# aspect = 16:9             # render aspect ratio: 16:9, 16:10, 4:3, 21:9, mbp (MacBook Pro display), ipad11, auto (window shape), or a ratio like 1.6\n"
     "# render_height = 1080      # render image height in pixels, or auto = the window's native pixel height\n"
+    "# upscaler = off            # metalfx: Apple's MetalFX upscaler when the window is larger than the render image (the menu View > Upscaler takes precedence)\n"
     "# fps = 60                  # frame rate: 30, 60 or 120 (the menu View > Frame Rate takes precedence)\n";
 
 #define KEYS_HELP_EN \
@@ -273,6 +274,8 @@ void bdsp_app_apply_display_defaults(void) {
     NSString *a = [d stringForKey:@"bdsp_aspect"], *h = [d stringForKey:@"bdsp_render_h"];
     if (a.length && !getenv("BDSP_ASPECT")) { setenv("BDSP_ASPECT", a.UTF8String, 0); g_display_env_from_defaults = 1; }
     if (h.length && !getenv("BDSP_RENDER_H")) setenv("BDSP_RENDER_H", h.UTF8String, 0);
+    NSString *u = [d stringForKey:@"bdsp_upscaler"];
+    if (u.length) setenv("BDSP_UPSCALER", u.UTF8String, 0);
 }
 
 @implementation BdspMenu
@@ -310,6 +313,11 @@ void bdsp_app_apply_display_defaults(void) {
     if (SDL_GetWindowFlags(w) & SDL_WINDOW_FULLSCREEN) SDL_SetWindowFullscreen(w, false);
     SDL_SetWindowSize(w, (int)(s.tag >> 16), (int)(s.tag & 0xFFFF));
     SDL_SyncWindow(w);
+}
+// View > Upscaler: MetalFX or plain sampling of an image smaller than the window, effective at once and kept in the defaults (env BDSP_UPSCALER wins at the start)
+- (void)setUpscaler:(NSMenuItem *)s {
+    bdsp_set_upscaler((int)s.tag);
+    [[NSUserDefaults standardUserDefaults] setObject:s.tag ? @"metalfx" : @"off" forKey:@"bdsp_upscaler"];
 }
 - (void)setFps:(NSMenuItem *)s {
     bdsp_set_fps((int)s.tag);
@@ -360,6 +368,7 @@ void bdsp_app_apply_display_defaults(void) {
     if (item.action == @selector(togglePause:)) item.state = g_user_paused ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(setDisplayPref:))
         item.state = [item.representedObject isEqualToString:display_pref_current(item.tag == 1)] ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(setUpscaler:)) item.state = item.tag == bdsp_upscaler() ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(setFps:)) item.state = item.tag == g_bdsp_fps ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(toggleMetalHud:)) item.state = [[NSUserDefaults standardUserDefaults] boolForKey:@"bdsp_metal_hud"] ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(selectAppIcon:)) {
@@ -472,6 +481,11 @@ static void install_menu(void) {
     ri.submenu = rm;
     const DisplayChoice *heights = display_height_choices(&nchoices);
     add_display_choices(rm, heights, nchoices, 2);
+    NSMenuItem *ui = [vm addItemWithTitle:L("Upscaler") action:nil keyEquivalent:@""];
+    NSMenu *um = [[NSMenu alloc] initWithTitle:L("Upscaler")];
+    ui.submenu = um;
+    item(um, L("Off"), @selector(setUpscaler:), @"", 0, g_target).tag = 0;
+    item(um, @"MetalFX", @selector(setUpscaler:), @"", 0, g_target).tag = 1;
     [vm addItem:[NSMenuItem separatorItem]];
     static const int sizes[4][2] = {{960, 540}, {1280, 720}, {1920, 1080}, {2560, 1440}};
     for (int i = 0; i < 4; i++) {

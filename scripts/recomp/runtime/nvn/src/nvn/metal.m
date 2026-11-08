@@ -852,42 +852,12 @@ static id<MTLTexture> raw_view(id<MTLTexture> t) {
 
 static void save_png(id<MTLTexture> tex, const char *path) { renderer_save_texture(tex, path); }
 
-// MetalFX spatial upscaling (Video tab "Upscaler" = MetalFX). metalfx_upscale() decides (and sets up the scaler for
-// this input / output size); metalfx_encode() runs it and returns the upscaled image.
-static id<MTLFXSpatialScaler> g_fx;
-static id<MTLTexture> g_fx_out;
-static NSUInteger g_fx_iw, g_fx_ih, g_fx_ow, g_fx_oh;
-static MTLPixelFormat g_fx_fmt;
-static id<MTLTexture> metalfx_upscale(id<MTLCommandBuffer> cb, id<MTLTexture> in, double ow_d, double oh_d) {
-    (void)cb;
-    if (g_settings.upscaler != UPSCALE_METALFX) return nil;
-    static int supported = -1;
-    if (supported < 0) {
-        supported = [MTLFXSpatialScalerDescriptor supportsDevice:dev] ? 1 : 0;
-        LOG("[metalfx] spatial scaler %s\n", supported ? "available" : "not supported on this GPU");
-    }
-    if (!supported) return nil;
-    NSUInteger ow = (NSUInteger)lround(ow_d), oh = (NSUInteger)lround(oh_d);
-    if (ow <= in.width + 1 && oh <= in.height + 1) return nil;  // not an upscale: plain sampling is right
-    if (ow > 16384) ow = 16384;
-    if (oh > 16384) oh = 16384;
-    if (!g_fx || g_fx_iw != in.width || g_fx_ih != in.height || g_fx_ow != ow || g_fx_oh != oh || g_fx_fmt != in.pixelFormat) {
-        MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
-        d.inputWidth = in.width; d.inputHeight = in.height;
-        d.outputWidth = ow; d.outputHeight = oh;
-        d.colorTextureFormat = in.pixelFormat;
-        d.outputTextureFormat = in.pixelFormat;
-        d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;  // (gamma-encoded 8-bit image)
-        g_fx = [d newSpatialScalerWithDevice:dev];
-        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:in.pixelFormat width:ow height:oh mipmapped:NO];
-        td.usage = g_fx ? g_fx.outputTextureUsage | MTLTextureUsageShaderRead : MTLTextureUsageShaderRead;
-        td.storageMode = MTLStorageModePrivate;
-        g_fx_out = [dev newTextureWithDescriptor:td];
-        g_fx_iw = in.width; g_fx_ih = in.height; g_fx_ow = ow; g_fx_oh = oh; g_fx_fmt = in.pixelFormat;
-        LOG("[metalfx] %lux%lu -> %lux%lu (%s)\n", (unsigned long)in.width, (unsigned long)in.height, (unsigned long)ow,
-            (unsigned long)oh, g_fx ? "ok" : "FAILED");
-    }
-    return g_fx && g_fx_out ? g_fx_out : nil;
+// MetalFX spatial upscaling (setting "upscaler", Mac View menu / iPad Settings): metalfx_scale.h
+#define METALFX_LOG LOG
+#include "metalfx_scale.h"
+static id<MTLTexture> metalfx_upscale(id<MTLTexture> in, double ow_d, double oh_d) {
+    if (__atomic_load_n(&g_settings.upscaler, __ATOMIC_RELAXED) != UPSCALE_METALFX) return nil;
+    return metalfx_prepare(dev, in, ow_d, oh_d);
 }
 // SMAA 1x (Video tab "Anti-aliasing"; third_party/smaa, MIT; as runtime/nvn/vulkan/shaders.c / exec.c): luma edges ->
 // blending weights -> neighbourhood blending, at the game image's size, before the present / MetalFX. The reference
@@ -1032,14 +1002,6 @@ static id<MTLTexture> smaa_encode(id<MTLCommandBuffer> cb, id<MTLTexture> in) {
     return out;
 }
 
-static id<MTLTexture> metalfx_encode(id<MTLCommandBuffer> cb, id<MTLTexture> in) {
-    g_fx.colorTexture = in;
-    g_fx.inputContentWidth = in.width;
-    g_fx.inputContentHeight = in.height;
-    g_fx.outputTexture = g_fx_out;
-    [g_fx encodeToCommandBuffer:cb];
-    return g_fx_out;
-}
 
 
 
@@ -1364,14 +1326,14 @@ static bool present_gpu_locked(uint64_t frame, id<MTLTexture> tex, bool has_wc, 
                 rp2.colorAttachments[0].storeAction = MTLStoreActionStore;
                 enc = [cb renderCommandEncoderWithDescriptor:rp2];
             }
-            // MetalFX (Video tab "Upscaler"): when the game image is smaller than its place in the window, Apple's
+            // MetalFX (setting "upscaler", metalfx_scale.h): when the game image is smaller than its place in the window, Apple's
             // spatial upscaler brings it to the window's size first (the whole image, so the interior crop below
             // still applies); the present pass then samples it about 1:1. Its own pass: the drawable's pass is
             // ended and resumed (load) around it.
-            id<MTLTexture> up = metalfx_upscale(cb, src, vw / crop[2], vh / crop[3]);
+            id<MTLTexture> up = metalfx_upscale(src, vw / crop[2], vh / crop[3]);
             if (up) {
                 [enc endEncoding];
-                up = metalfx_encode(cb, src);
+                up = metalfx_encode(cb, src, frame);   // (a repeated present reuses the image already scaled)
                 MTLRenderPassDescriptor *rp2 = [MTLRenderPassDescriptor renderPassDescriptor];
                 rp2.colorAttachments[0].texture = drawable.texture;
                 rp2.colorAttachments[0].loadAction = MTLLoadActionLoad;
