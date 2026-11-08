@@ -441,7 +441,48 @@ static uint32_t block_current(int64_t timeout_ns) {  // g_klock gehalten
     return t->wait_result;
 }
 
+// ArbitrateLock spins this long (ns) before it sleeps, without the kernel lock: if the owner releases meanwhile (the mutex word no
+// longer reads owner | WAITERS_BIT) the SVC returns success and the SDK takes the mutex on its fast path, which Horizon allows (the
+// SDK loops after ArbitrateLock). Without it every contended lock sleeps and is handed over to a sleeping thread, which then needs
+// a host wake-up before anyone can use the mutex (a lock convoy; BDSP makes about 2,900 ArbitrateLock calls a second).
+// BDSP_LOCK_SPIN_NS overrides, 0 turns it off. 5 us: on an M1, 4 threads contending gained 3.4x lock throughput with less CPU per
+// lock, 8 threads on 8 cores lost 11-15% (review/lock_bench.py); not yet measured in the game.
+static int64_t lock_spin_ns(void) {
+    static int64_t ns = -1;
+    if (ns < 0) { const char *e = getenv("BDSP_LOCK_SPIN_NS"); ns = e ? atoll(e) : 5000; if (ns < 0) ns = 0; }
+    return ns;
+}
+static inline void spin_relax(void) {
+#if defined(__aarch64__)
+    __asm__ volatile("yield" ::: "memory");
+#elif defined(__x86_64__)
+    __asm__ volatile("pause" ::: "memory");
+#endif
+}
+// Spinning pays only while the owner releases to nobody: once threads sleep on a mutex, ArbitrateUnlock hands it to one of them
+// and the spinners only burn time (measured with review/lock_bench.py: 8 threads on 8 cores lost up to half their throughput with
+// a fixed spin). So each mutex (hashed by address) keeps a score: a spin that ends with the mutex released raises it, one that
+// gives up lowers it by 8, and while it is negative calls skip the spin and count it back up, probing again after 8 calls.
+static int8_t spin_score[256];
 static uint32_t svc_arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) {
+    int64_t spin = lock_spin_ns();
+    if (spin) {
+        int8_t *score = &spin_score[(addr >> 2) & 255];
+        int8_t s = __atomic_load_n(score, __ATOMIC_RELAXED);
+        if (s < 0) __atomic_store_n(score, (int8_t)(s + 1), __ATOMIC_RELAXED);
+        else {
+            uint64_t until = rt_now_ns() + (uint64_t)spin;
+            for (unsigned i = 1;; i++) {
+                if (__atomic_load_n(u32p(addr), __ATOMIC_ACQUIRE) != (owner | WAITERS_BIT)) {
+                    if (s < 16) __atomic_store_n(score, (int8_t)(s + 1), __ATOMIC_RELAXED);
+                    return R_OK;
+                }
+                spin_relax();
+                if (!(i & 31) && rt_now_ns() >= until) break;
+            }
+            __atomic_store_n(score, (int8_t)(s > 8 ? s - 8 : -8), __ATOMIC_RELAXED);
+        }
+    }
     pthread_mutex_lock(&g_klock);
     uint32_t v = __atomic_load_n(u32p(addr), __ATOMIC_SEQ_CST);
     if (v != (owner | WAITERS_BIT)) { pthread_mutex_unlock(&g_klock); return R_OK; }

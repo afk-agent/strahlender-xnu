@@ -335,6 +335,55 @@ int main(void){
             run = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
             self.assertEqual(run.returncode, 0, f"probe exit {run.returncode}\n{native}")
 
+    @unittest.skipUnless(shutil.which("clang") and platform.machine().lower() in ("arm64", "aarch64"),
+                         "native assembly execution needs Clang on AArch64")
+    def test_assembly_batch_moves_only_registers_it_needs(self):
+        # A batch loads a register only if it may read it before writing all of it, and stores only registers it writes.
+        with tempfile.TemporaryDirectory(dir=self.folder) as temporary:
+            folder = Path(temporary)
+            source = synthetic_nso(folder / "moves.nso")
+            raw = bytearray(source.read_bytes())
+            words = [0x1e270025,   # fmov s5, w1        x1 read only; v5 written whole before any read
+                     0x1e2728a6,   # fadd s6, s5, s7    v7 read only
+                     0x1e2600c2,   # fmov w2, s6        x2 written, never read
+                     0xbc404468,   # ldr s8, [x3], #4   x3 read and written back
+                     0xd65f03c0]   # ret
+            struct.pack_into(f"<{len(words)}I", raw, 0x120, *words)
+            source.write_bytes(raw)
+            base = 0x801000000
+            native = self.run_native("emit-function", source, "--base", hex(base), "--entry", hex(base + 0x20),
+                                     "--end", hex(base + 0x20 + 4 * len(words)), "--simd", "asm").stdout
+            # guest x1, x2, x3 get x9, x10, x11 in order of appearance
+            for moved in ("ldr x9,", "str x10,", "ldr x11,", "str x11,", "ldr q7,", "str q5,", "str q6,", "str q8,"):
+                self.assertIn(moved, native)
+            for kept in ("str x9,", "ldr x10,", "ldr q5,", "ldr q6,", "ldr q8,", "str q7,"):
+                self.assertNotIn(kept, native)
+            program = folder / "moves.c"
+            program.write_text('#include "cpu.h"\n#include <stdlib.h>\n' + native + r"""
+volatile int g_fnprof;
+void fnprof_hit(uint64_t a,uint64_t b,uint64_t d){(void)a;(void)b;(void)d;}
+int main(void){
+    Cpu c; memset(&c,0,sizeof c);
+    float one=1.5f, two=2.25f, table[2]={9.0f,0}; uint32_t bits1; memcpy(&bits1,&one,4);
+    c.x[1]=bits1; c.x[2]=0xdeadbeefdeadbeefull; c.x[3]=(uintptr_t)table;
+    memset(&c.v[5],0xff,16); memset(&c.v[6],0xff,16); memcpy(&c.v[7],&two,4);
+    f_801000020(&c);
+    float sum; uint32_t w=(uint32_t)c.x[2]; memcpy(&sum,&w,4);
+    if(sum!=3.75f||c.x[2]>>32) return 1;                    /* fmov w2 writes the whole register */
+    if(c.x[3]!=(uintptr_t)table+4||c.x[1]!=bits1) return 2;  /* post-index write-back; x1 unchanged */
+    float loaded; memcpy(&loaded,&c.v[8],4); if(loaded!=9.0f) return 3;
+    uint64_t hi; memcpy(&hi,(char*)&c.v[5]+8,8); if(hi) return 4;   /* a scalar result clears the rest of v5 */
+    return 0;
+}
+""")
+            executable = folder / "moves-probe"
+            built = subprocess.run(["clang", "-std=c17", "-D_DEFAULT_SOURCE", "-O2", "-w", "-I", str(ROOT / "scripts/recomp/rt"),
+                                    "-I", str(ROOT / "scripts/recomp/upstream/runtime"), str(program), "-o", str(executable)],
+                                   text=True, capture_output=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            run = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(run.returncode, 0, f"probe exit {run.returncode}\n{native}")
+
     @unittest.skipUnless(shutil.which("clang"), "portable execution probe requires Clang")
     def test_emitted_portable_simd_memory_and_fp_execute(self):
         with tempfile.TemporaryDirectory(dir=self.folder) as temporary:
