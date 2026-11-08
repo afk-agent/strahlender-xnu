@@ -20,12 +20,21 @@ bool cg_emit_asm_batch(const AsmInstruction *batch, size_t count, const char **r
     static const unsigned with_x16[] = {9, 10, 11, 12, 13, 14, 15, 16, 17}, without_x16[] = {9, 10, 11, 12, 13, 14, 15, 17};
     const unsigned *scratch = flags ? without_x16 : with_x16;
     const size_t capacity = flags ? 8 : 9;
-    MappedRegister map[9]; MappedConstant constants[9]; uint32_t words[24], vregs = 0;
+    MappedRegister map[9]; MappedConstant constants[9]; uint32_t words[24];
+    /* Only what the batch needs crosses between Cpu and the host registers: a register is loaded when the batch may read it
+       before writing all of it, and stored when the batch writes it. Before, every register was loaded and stored (about half
+       of the instructions of SIMD-heavy guest functions). */
+    uint32_t vload = 0, vstore = 0, vdefined = 0, vtouched = 0;
+    bool gload[9] = {0}, gstore[9] = {0}, gdefined[9] = {0};
     size_t mapped = 0, const_count = 0;
     for (size_t i = 0; i < count; i++) {
         const AsmInstruction *ins = &batch[i];
         if (ins->gpr_count > 3 || ins->constant_count > 1) cg_fail(4, "invalid assembly metadata");
-        vregs |= ins->vregs; uint32_t w = ins->word;
+        uint32_t vread = ins->exact ? ins->vread : ins->vregs, vwrite = ins->exact ? ins->vwrite : ins->vregs;
+        uint32_t vfull = ins->exact ? ins->vfull : 0;
+        vload |= vread & ~vdefined; vstore |= vwrite; vdefined |= vfull; vtouched |= vread | vwrite;
+        uint32_t w = ins->word;
+        size_t slot[3];
         for (size_t j = 0; j < ins->gpr_count; j++) {
             unsigned g = ins->gprs[j].reg, position = ins->gprs[j].position;
             if (g > 31 || position > 27) cg_fail(4, "invalid assembly register metadata");
@@ -34,8 +43,13 @@ bool cg_emit_asm_batch(const AsmInstruction *batch, size_t count, const char **r
                 if (mapped + const_count >= capacity) return false;
                 map[at] = (MappedRegister){g, scratch[mapped + const_count]}; mapped++;
             }
+            slot[j] = at;
             w = (w & ~(31u << position)) | (map[at].scratch << position);
         }
+        for (size_t j = 0; j < ins->gpr_count; j++)   /* an instruction reads its operands before it writes */
+            if (ins->gprs[j].read && !gdefined[slot[j]]) gload[slot[j]] = true;
+        for (size_t j = 0; j < ins->gpr_count; j++)
+            if (ins->gprs[j].write) gstore[slot[j]] = gdefined[slot[j]] = true;
         for (size_t j = 0; j < ins->constant_count; j++) {
             if (mapped + const_count >= capacity) return false;
             unsigned s = scratch[mapped + const_count], position = ins->constants[j].position;
@@ -47,18 +61,20 @@ bool cg_emit_asm_batch(const AsmInstruction *batch, size_t count, const char **r
     }
     if (!result) return true;
     Buffer b = {0}; cg_buffer(&b, "__asm__ volatile(\"", strlen("__asm__ volatile(\"")); bool first = true;
-    for (size_t i = 0; i < mapped; i++) asm_line(&b, &first, cg_format("ldr x%u, [%%0, #%u]", map[i].scratch, map[i].guest == 31 ? 256u : 8u * map[i].guest));
+    for (size_t i = 0; i < mapped; i++)
+        if (gload[i]) asm_line(&b, &first, cg_format("ldr x%u, [%%0, #%u]", map[i].scratch, map[i].guest == 31 ? 256u : 8u * map[i].guest));
     for (size_t i = 0; i < const_count; i++) asm_line(&b, &first, cg_format("mov x%u, %%%zu", constants[i].scratch, i + 1));
-    for (unsigned v = 0; v < 32; v++) if (vregs & (UINT32_C(1) << v)) asm_line(&b, &first, cg_format("ldr q%u, [%%0, #%u]", v, 512u + 16u * v));
+    for (unsigned v = 0; v < 32; v++) if (vload & (UINT32_C(1) << v)) asm_line(&b, &first, cg_format("ldr q%u, [%%0, #%u]", v, 512u + 16u * v));
     if (flags) { asm_line(&b, &first, "ldr x16, [%0, #272]"); asm_line(&b, &first, "msr nzcv, x16"); }
     for (size_t i = 0; i < count; i++) asm_line(&b, &first, cg_format(".inst 0x%08" PRIx32, words[i]));
     if (flags) { asm_line(&b, &first, "mrs x16, nzcv"); asm_line(&b, &first, "str x16, [%0, #272]"); }
-    for (unsigned v = 0; v < 32; v++) if (vregs & (UINT32_C(1) << v)) asm_line(&b, &first, cg_format("str q%u, [%%0, #%u]", v, 512u + 16u * v));
-    for (size_t i = 0; i < mapped; i++) asm_line(&b, &first, cg_format("str x%u, [%%0, #%u]", map[i].scratch, map[i].guest == 31 ? 256u : 8u * map[i].guest));
+    for (unsigned v = 0; v < 32; v++) if (vstore & (UINT32_C(1) << v)) asm_line(&b, &first, cg_format("str q%u, [%%0, #%u]", v, 512u + 16u * v));
+    for (size_t i = 0; i < mapped; i++)
+        if (gstore[i]) asm_line(&b, &first, cg_format("str x%u, [%%0, #%u]", map[i].scratch, map[i].guest == 31 ? 256u : 8u * map[i].guest));
     cg_buffer(&b, "\" :: \"r\"(c)", strlen("\" :: \"r\"(c)"));
     for (size_t i = 0; i < const_count; i++) cg_printf(&b, ", \"r\"(0x%s%" PRIx64 "ull)", constants[i].negative ? "-" : "", constants[i].value);
     cg_buffer(&b, " : ", 3); const char *separator = "";
-    for (unsigned v = 0; v < 32; v++) if (vregs & (UINT32_C(1) << v)) { cg_printf(&b, "%s\"v%u\"", separator, v); separator = ", "; }
+    for (unsigned v = 0; v < 32; v++) if (vtouched & (UINT32_C(1) << v)) { cg_printf(&b, "%s\"v%u\"", separator, v); separator = ", "; }
     bool clobber[32] = {0}; clobber[16] = flags;
     for (size_t i = 0; i < mapped; i++) clobber[map[i].scratch] = true;
     for (size_t i = 0; i < const_count; i++) clobber[constants[i].scratch] = true;

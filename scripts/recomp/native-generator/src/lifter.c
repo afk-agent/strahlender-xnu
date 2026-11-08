@@ -158,59 +158,127 @@ static Instruction assembly(uint32_t word, uint32_t vregs) {
     return (Instruction){.kind = CG_ASM, .assembly = {.word = word, .vregs = vregs}};
 }
 static void asm_reg(Instruction *ins, unsigned position, unsigned r) {
-    ins->assembly.gprs[ins->assembly.gpr_count++] = (AsmRegister){position, r};
+    ins->assembly.gprs[ins->assembly.gpr_count++] = (AsmRegister){position, r, true, true};
+}
+static void asm_reg_use(Instruction *ins, unsigned position, unsigned r, bool read, bool write) {
+    ins->assembly.gprs[ins->assembly.gpr_count++] = (AsmRegister){position, r, read, write};
+}
+static void exact(Instruction *ins, uint32_t read, uint32_t write, uint32_t full) {
+    ins->assembly.exact = true; ins->assembly.vread = read; ins->assembly.vwrite = write; ins->assembly.vfull = full;
 }
 static Instruction simd_load_store(uint32_t w, uint64_t pc) {
     unsigned rt = bits(w, 0, 5), rn = bits(w, 5, 5), rm = bits(w, 16, 5);
+    uint32_t t = UINT32_C(1) << rt;
+    bool load = bits(w, 22, 1) != 0;
     if (bits(w, 27, 3) == 3 && !bits(w, 24, 2)) {
         unsigned opc = bits(w, 30, 2);
         if (opc == 3) return unsupported(pc, "SIMD literal opc 3"); /* Frozen Python rejects this reserved encoding. */
         unsigned size = (unsigned[]){2, 3, 0}[opc], o = opc == 2 ? 3u : 1u;
-        Instruction ins = assembly((size << 30) | 0x3d000000 | (o << 22) | (31u << 5) | rt, UINT32_C(1) << rt);
+        Instruction ins = assembly((size << 30) | 0x3d000000 | (o << 22) | (31u << 5) | rt, t);
+        exact(&ins, 0, t, t);   /* LDR (literal): the whole register */
         int64_t displacement = sext(bits(w, 5, 19), 19) * 4;
         uint64_t magnitude = displacement < 0 ? (uint64_t)(-displacement) : 0;
         bool negative = displacement < 0 && pc < magnitude;
         ins.assembly.constants[0] = (AsmConstant){5, negative ? magnitude - pc : pc + (uint64_t)displacement, negative};
         ins.assembly.constant_count = 1; return ins;
     }
-    Instruction ins = assembly(w, UINT32_C(1) << rt);
+    Instruction ins = assembly(w, t);
     if (!bits(w, 31, 1) && (bits(w, 24, 6) == 12 || bits(w, 24, 6) == 13)) {
         unsigned n;
-        if (!bits(w, 24, 1)) {
+        bool single = bits(w, 24, 1) != 0;
+        if (!single) {
             unsigned counts[] = {4, 0, 4, 0, 3, 0, 3, 1, 2, 0, 2, 0, 0, 0, 0, 0};
             n = counts[bits(w, 12, 4)];
             if (!n) return unsupported(pc, "ldst multiple opcode");
         } else n = ((bits(w, 13, 1) << 1) | bits(w, 21, 1)) + 1;
-        for (unsigned i = 0; i < n; i++) ins.assembly.vregs |= UINT32_C(1) << ((rt + i) % 32);
-        asm_reg(&ins, 5, rn);
-        if (bits(w, 23, 1) && rm != 31) asm_reg(&ins, 16, rm);
+        uint32_t regs = 0;
+        for (unsigned i = 0; i < n; i++) regs |= UINT32_C(1) << ((rt + i) % 32);
+        ins.assembly.vregs |= regs;
+        /* LD1..LD4 (multiple) and LD1R..LD4R write whole registers (a 64-bit form clears the upper half); a lane load keeps the
+           other lanes, so it reads the register too. Stores only read. */
+        bool whole = !single || bits(w, 14, 2) == 3;
+        if (!load) exact(&ins, regs, 0, 0);
+        else if (whole) exact(&ins, 0, regs, regs);
+        else exact(&ins, regs, regs, 0);
+        asm_reg_use(&ins, 5, rn, true, bits(w, 23, 1) != 0);   /* post-index writes the base back */
+        if (bits(w, 23, 1) && rm != 31) asm_reg_use(&ins, 16, rm, true, false);
+        return ins;
+    }
+    if (bits(w, 27, 3) == 5) {   /* LDP/STP/LDNP/STNP of vector registers */
+        uint32_t pair = t | (UINT32_C(1) << bits(w, 10, 5));
+        ins.assembly.vregs |= pair;
+        if (load) exact(&ins, 0, pair, pair); else exact(&ins, pair, 0, 0);
+        unsigned mode = bits(w, 23, 2);
+        asm_reg_use(&ins, 5, rn, true, mode == 1 || mode == 3);
+        return ins;
+    }
+    if (bits(w, 27, 3) == 7) {   /* LDR/STR/LDUR/STUR of one vector register */
+        bool register_offset = !bits(w, 24, 2) && bits(w, 21, 1);
+        bool writeback = !bits(w, 24, 2) && !bits(w, 21, 1) && (bits(w, 10, 2) == 1 || bits(w, 10, 2) == 3);
+        if (load) exact(&ins, 0, t, t); else exact(&ins, t, 0, 0);
+        asm_reg_use(&ins, 5, rn, true, writeback);
+        if (register_offset && bits(w, 10, 2) == 2 && rm != 31) asm_reg_use(&ins, 16, rm, true, false);
         return ins;
     }
     asm_reg(&ins, 5, rn);
-    if (bits(w, 27, 3) == 5) ins.assembly.vregs |= UINT32_C(1) << bits(w, 10, 5);
-    else if (bits(w, 27, 3) == 7 && !bits(w, 24, 2) && bits(w, 21, 1) && bits(w, 10, 2) == 2 && rm != 31) asm_reg(&ins, 16, rm);
     return ins;
+}
+/* Exact register use of the scalar floating-point classes (FP data processing, compares, FMOV immediate, FCSEL, FCCMP,
+   3-source). Their result is a scalar, which clears the rest of the register. */
+static bool scalar_fp(Instruction *ins, uint32_t w) {
+    unsigned rd = bits(w, 0, 5), rn = bits(w, 5, 5), rm = bits(w, 16, 5), ra = bits(w, 10, 5);
+    uint32_t d = UINT32_C(1) << rd, n = UINT32_C(1) << rn, m = UINT32_C(1) << rm;
+    if ((w & 0x5f000000) == 0x1f000000) { exact(ins, n | m | (UINT32_C(1) << ra), d, d); return true; }   /* FMADD family */
+    if ((w & 0x5f200000) != 0x1e200000) return false;
+    if ((w & 0x5f207c00) == 0x1e204000) { exact(ins, n, d, d); return true; }            /* 1-source: FMOV, FABS, FNEG, FSQRT, FCVT, FRINT */
+    if ((w & 0x5f203c00) == 0x1e202000) { exact(ins, n | m, 0, 0); return true; }        /* FCMP, FCMPE */
+    if ((w & 0x5f201c00) == 0x1e201000) { exact(ins, 0, d, d); return true; }            /* FMOV (immediate) */
+    if ((w & 0x5f200c00) == 0x1e200400) { exact(ins, n | m, 0, 0); return true; }        /* FCCMP, FCCMPE */
+    if ((w & 0x5f200c00) == 0x1e200800) { exact(ins, n | m, d, d); return true; }        /* 2-source */
+    if ((w & 0x5f200c00) == 0x1e200c00) { exact(ins, n | m, d, d); return true; }        /* FCSEL */
+    return false;
 }
 static Instruction simd_instruction(uint32_t w) {
     unsigned rd = bits(w, 0, 5), rn = bits(w, 5, 5), rm = bits(w, 16, 5), ra = bits(w, 10, 5);
+    uint32_t d = UINT32_C(1) << rd, n = UINT32_C(1) << rn;
     Instruction ins = assembly(w, (UINT32_C(1) << rd) | (UINT32_C(1) << rn) | (UINT32_C(1) << rm) | (UINT32_C(1) << ra));
     bool from_fp = false, conversion = false;
     if ((w & 0x5f20fc00) == 0x1e200000) {
         unsigned opcode = bits(w, 16, 3); conversion = true;
         from_fp = opcode == 0 || opcode == 1 || opcode == 4 || opcode == 5 || opcode == 6;
+        /* FMOV Vd.D[1], Xn writes the upper half only */
+        if (from_fp) exact(&ins, n, 0, 0);
+        else if (bits(w, 19, 2) == 1 && opcode == 7) exact(&ins, d, d, 0);
+        else exact(&ins, 0, d, d);
     } else if ((w & 0x5f200000) == 0x1e000000) {
         unsigned opcode = bits(w, 16, 3); conversion = true; from_fp = opcode == 0 || opcode == 1;
+        if (from_fp) exact(&ins, n, 0, 0); else exact(&ins, 0, d, d);
     } else if ((w & 0x9fe08400) == 0x0e000400 && !bits(w, 29, 1)) {
         unsigned imm4 = bits(w, 11, 4);
-        if (imm4 == 1 || imm4 == 3 || imm4 == 5 || imm4 == 7) { conversion = true; from_fp = imm4 == 5 || imm4 == 7; }
-        else ins.assembly.vregs = (UINT32_C(1) << rd) | (UINT32_C(1) << rn);
+        if (imm4 == 1 || imm4 == 3 || imm4 == 5 || imm4 == 7) {
+            conversion = true; from_fp = imm4 == 5 || imm4 == 7;
+            if (from_fp) exact(&ins, n, 0, 0);          /* SMOV, UMOV */
+            else if (imm4 == 1) exact(&ins, 0, d, d);   /* DUP (general) */
+            else exact(&ins, d, d, 0);                  /* INS (general): one element */
+        } else {
+            ins.assembly.vregs = d | n;
+            if (!imm4) exact(&ins, n, d, d);            /* DUP (element) */
+        }
     } else if ((w & 0xbfe08c00) == 0x0e000000) {
-        ins.assembly.vregs = (UINT32_C(1) << rd) | (UINT32_C(1) << rm);
-        for (unsigned i = 0; i <= bits(w, 13, 2); i++) ins.assembly.vregs |= UINT32_C(1) << ((rn + i) % 32);
+        uint32_t table = 0;
+        for (unsigned i = 0; i <= bits(w, 13, 2); i++) table |= UINT32_C(1) << ((rn + i) % 32);
+        ins.assembly.vregs = d | (UINT32_C(1) << rm) | table;
+        /* TBL writes the whole register; TBX keeps elements whose index is out of range */
+        exact(&ins, table | (UINT32_C(1) << rm) | (bits(w, 12, 1) ? d : 0), d, bits(w, 12, 1) ? 0 : d);
+    } else if (!scalar_fp(&ins, w)) {
+        /* Any other instruction of the SIMD and FP data-processing class writes Rd at most (never Rn, Rm or Ra), so only Rd is
+           stored. Whether it reads Rd (accumulate, insert, the "2" narrowing forms) is not decoded: every field counts as read. */
+        exact(&ins, ins.assembly.vregs, d, 0);
     }
     if (conversion) {
         ins.assembly.vregs = UINT32_C(1) << (from_fp ? rn : rd);
-        if ((from_fp ? rd : rn) != 31) asm_reg(&ins, from_fp ? 0u : 5u, from_fp ? rd : rn);
+        /* a general register written by a conversion (FMOV, FCVTZS, SMOV, UMOV, ...) is written in full, never read */
+        if ((from_fp ? rd : rn) != 31) asm_reg_use(&ins, from_fp ? 0u : 5u, from_fp ? rd : rn, !from_fp, from_fp);
     }
     ins.assembly.flags = (w & 0x5f203c00) == 0x1e202000 || (w & 0x5f200c00) == 0x1e200400 || (w & 0x5f200c00) == 0x1e200c00;
     return ins;
@@ -383,9 +451,10 @@ static Instruction register_instruction(uint32_t w, uint64_t pc, bool portable) 
             if (opcode >= 16 && opcode <= 23) {
                 if (!portable) {
                     Instruction ins = assembly(w, 0);
-                    if (rd != 31) asm_reg(&ins, 0, rd);
-                    if (rn != 31) asm_reg(&ins, 5, rn);
-                    if (rm != 31) asm_reg(&ins, 16, rm);
+                    exact(&ins, 0, 0, 0);
+                    if (rd != 31) asm_reg_use(&ins, 0, rd, false, true);   /* CRC32 writes Wd (clearing the upper half) */
+                    if (rn != 31) asm_reg_use(&ins, 5, rn, true, false);
+                    if (rm != 31) asm_reg_use(&ins, 16, rm, true, false);
                     return ins;
                 }
                 unsigned crc_size = bits(w, 10, 2);

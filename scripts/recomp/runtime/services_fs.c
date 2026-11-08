@@ -342,6 +342,45 @@ static void romfs_build_index(void) {
     pthread_mutex_unlock(&rom_lock);
 }
 
+// Open RomFS files: reads of a file reuse its descriptor instead of open + pread + close on every request (review/romfs_bench.py:
+// each read then saves a path lookup and two system calls). 64 slots, least recently used one replaced; a slot in use by a
+// read in progress (busy) is never closed. Every file stays reachable when all slots are busy: the read then opens its own.
+#define FD_SLOTS 64
+static struct { const RFile *file; int fd, busy; uint64_t used; } fd_cache[FD_SLOTS];
+static pthread_mutex_t fd_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t fd_clock;
+static int romfs_fd_acquire(const RFile *f, int *slot) {
+    pthread_mutex_lock(&fd_lock);
+    for (int i = 0; i < FD_SLOTS; i++)
+        if (fd_cache[i].file == f) {
+            fd_cache[i].busy++; fd_cache[i].used = ++fd_clock; *slot = i;
+            int fd = fd_cache[i].fd;
+            pthread_mutex_unlock(&fd_lock);
+            return fd;
+        }
+    pthread_mutex_unlock(&fd_lock);
+    int fd = open(f->path, O_RDONLY);   // outside the lock: other reads go on meanwhile
+    *slot = -1;
+    if (fd < 0) return -1;
+    pthread_mutex_lock(&fd_lock);
+    int victim = -1;
+    for (int i = 0; i < FD_SLOTS; i++)
+        if (!fd_cache[i].busy && (victim < 0 || fd_cache[i].used < fd_cache[victim].used)) victim = i;
+    if (victim >= 0) {
+        if (fd_cache[victim].file) close(fd_cache[victim].fd);
+        fd_cache[victim].file = f; fd_cache[victim].fd = fd; fd_cache[victim].busy = 1; fd_cache[victim].used = ++fd_clock;
+        *slot = victim;
+    }
+    pthread_mutex_unlock(&fd_lock);
+    return fd;
+}
+static void romfs_fd_release(int fd, int slot) {
+    if (slot < 0) { close(fd); return; }
+    pthread_mutex_lock(&fd_lock);
+    fd_cache[slot].busy--;
+    pthread_mutex_unlock(&fd_lock);
+}
+
 // liest [off, off+size) des virtuellen Abbildes
 static uint64_t romfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
     uint64_t done = 0;
@@ -370,9 +409,9 @@ static uint64_t romfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
                 RFile *f = rom.sorted[idx];
                 uint64_t in = o - f->data_off;
                 if (n > f->size - in) n = f->size - in;
-                int fd = open(f->path, O_RDONLY);
+                int slot, fd = romfs_fd_acquire(f, &slot);
                 ssize_t r = fd >= 0 ? pread(fd, dst + done, n, (int64_t)in) : -1;
-                if (fd >= 0) close(fd);
+                if (fd >= 0) romfs_fd_release(fd, slot);
                 if (r < 0) {
                     static int warned;   // the game then reads zeros; name the first file instead of failing somewhere inside the guest
                     if (!__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED)) LOG("[fs] cannot read %s (%s): reads return zeros\n", f->path, strerror(errno));
