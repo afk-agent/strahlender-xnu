@@ -453,19 +453,30 @@ NPAD_STATES("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj", npad_ss_h
 NPAD_STATES("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", npad_ss_right)
 HLE_FUNC("_ZN2nn3hid15GetNpadStyleSetERKj", npad_style) { c->x[0] = *(uint32_t *)G2HC(c->x[0]) == 0 ? 1 : 0; }  // player 1 only, style "Pro Controller"
 
-// Upscaler of the presented image (settings.h; the backend calls settings_load when it starts): BDSP_UPSCALER=metalfx (also on, 1, yes, true;
-// any case) runs
-// Apple's MetalFX spatial upscaler when the game's image is smaller than its place on the screen (nvn/metalfx_scale.h), off (default) samples
-// it bilinearly. The shells set the variable from their settings (iPad Settings app; Mac View menu, then config.ini "upscaler"); the Mac menu
-// switches it while the game runs (bdsp_set_upscaler). The Vulkan backend has no MetalFX and ignores the value.
-void bdsp_set_upscaler(int on) { __atomic_store_n(&g_settings.upscaler, on ? UPSCALE_METALFX : UPSCALE_OFF, __ATOMIC_RELAXED); }
-int bdsp_upscaler(void) { return __atomic_load_n(&g_settings.upscaler, __ATOMIC_RELAXED) == UPSCALE_METALFX; }
+// Upscaler of the presented image (settings.h; the backend calls settings_load when it starts), BDSP_UPSCALER (any case):
+//   metalfx (also on, 1, yes, true): Apple's MetalFX spatial upscaler when the game's image is smaller than its place on the screen
+//     (nvn/src/nvn/metalfx_scale.h);
+//   temporal (also metalfx-temporal, 2): MetalFX temporal upscaling and anti-aliasing from jittered frames, the scene's motion and depth
+//     (nvn/src/nvn/taa.inc, metalfx_temporal.h), also at the image's own size;
+//   off (default, anything else): the image is sampled bilinearly.
+// The shells set the variable from their settings (iPad Settings app; Mac View menu, then config.ini "upscaler"); the Mac menu switches it
+// while the game runs (bdsp_set_upscaler). The Vulkan backend has no MetalFX and ignores the value.
+void bdsp_set_upscaler(int mode) {
+    int m = mode == 2 ? UPSCALE_METALFX_TEMPORAL : mode ? UPSCALE_METALFX : UPSCALE_OFF;
+    __atomic_store_n(&g_settings.upscaler, m, __ATOMIC_RELAXED);
+}
+int bdsp_upscaler(void) {   // (the mode number: the backends' enums differ)
+    int u = __atomic_load_n(&g_settings.upscaler, __ATOMIC_RELAXED);
+    return u == UPSCALE_METALFX_TEMPORAL ? 2 : u == UPSCALE_METALFX ? 1 : 0;
+}
 void settings_load(void) {
     const char *u = getenv("BDSP_UPSCALER");
-    static const char *const on[] = {"metalfx", "on", "1", "yes", "true"};
+    static const char *const spatial[] = {"metalfx", "on", "1", "yes", "true"};
+    static const char *const temporal[] = {"temporal", "metalfx-temporal", "metalfx_temporal", "2"};
     if (!u) return;
     int v = 0;
-    for (unsigned i = 0; i < sizeof on / sizeof on[0]; i++) v |= !strcasecmp(u, on[i]);
+    for (unsigned i = 0; i < sizeof spatial / sizeof spatial[0]; i++) if (!strcasecmp(u, spatial[i])) v = 1;
+    for (unsigned i = 0; i < sizeof temporal / sizeof temporal[0]; i++) if (!strcasecmp(u, temporal[i])) v = 2;
     bdsp_set_upscaler(v);
 }
 

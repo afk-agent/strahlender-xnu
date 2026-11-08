@@ -244,7 +244,8 @@ static const char *const k_default_config =
     "# backups = 10              # number of backups at start\n"
     "# aspect = 16:9             # render aspect ratio: 16:9, 16:10, 4:3, 21:9, mbp (MacBook Pro display), ipad11, auto (window shape), or a ratio like 1.6\n"
     "# render_height = 1080      # render image height in pixels, or auto = the window's native pixel height\n"
-    "# upscaler = off            # metalfx: Apple's MetalFX upscaler when the window is larger than the render image (the menu View > Upscaler takes precedence)\n"
+    "# upscaler = off            # metalfx: Apple's MetalFX upscaler when the window is larger than the render image; temporal: MetalFX temporal\n"
+    "#                            # upscaling and anti-aliasing (also at the image's own size) (the menu View > Upscaler takes precedence)\n"
     "# fps = 60                  # frame rate: 30, 60 or 120 (the menu View > Frame Rate takes precedence)\n";
 
 #define KEYS_HELP_EN \
@@ -314,11 +315,14 @@ void bdsp_app_apply_display_defaults(void) {
     SDL_SetWindowSize(w, (int)(s.tag >> 16), (int)(s.tag & 0xFFFF));
     SDL_SyncWindow(w);
 }
-// View > Upscaler: MetalFX or plain sampling of an image smaller than the window, effective at once and kept in the defaults (env BDSP_UPSCALER wins at the start)
+// View > Upscaler: MetalFX (spatial or temporal) or plain sampling of the image, effective at once and kept in the defaults (env BDSP_UPSCALER
+// wins at the start)
 - (void)setUpscaler:(NSMenuItem *)s {
+    static const char *const names[] = {"off", "metalfx", "temporal"};
+    const char *n = names[s.tag >= 0 && s.tag <= 2 ? s.tag : 0];
     bdsp_set_upscaler((int)s.tag);
-    [[NSUserDefaults standardUserDefaults] setObject:s.tag ? @"metalfx" : @"off" forKey:@"bdsp_upscaler"];
-    setenv("BDSP_UPSCALER", s.tag ? "metalfx" : "off", 1);   // (a restart by exec keeps the environment: the old value must not win there)
+    [[NSUserDefaults standardUserDefaults] setObject:@(n) forKey:@"bdsp_upscaler"];
+    setenv("BDSP_UPSCALER", n, 1);   // (a restart by exec keeps the environment: the old value must not win there)
 }
 - (void)setFps:(NSMenuItem *)s {
     bdsp_set_fps((int)s.tag);
@@ -486,7 +490,8 @@ static void install_menu(void) {
     NSMenu *um = [[NSMenu alloc] initWithTitle:L("Upscaler")];
     ui.submenu = um;
     item(um, L("Off"), @selector(setUpscaler:), @"", 0, g_target).tag = 0;
-    item(um, @"MetalFX", @selector(setUpscaler:), @"", 0, g_target).tag = 1;
+    item(um, L("MetalFX Spatial"), @selector(setUpscaler:), @"", 0, g_target).tag = 1;
+    item(um, L("MetalFX Temporal"), @selector(setUpscaler:), @"", 0, g_target).tag = 2;
     [vm addItem:[NSMenuItem separatorItem]];
     static const int sizes[4][2] = {{960, 540}, {1280, 720}, {1920, 1080}, {2560, 1440}};
     for (int i = 0; i < 4; i++) {

@@ -2,7 +2,7 @@
 #pragma once
 #include <stdbool.h>
 
-enum { UPSCALE_OFF, UPSCALE_METALFX, UPSCALE_FSR1 };
+enum { UPSCALE_OFF, UPSCALE_METALFX, UPSCALE_FSR1, UPSCALE_METALFX_TEMPORAL };   // (the MetalFX values: Metal only, ignored here)
 enum { AA_OFF, AA_SMAA };
 typedef struct { int upscaler, antialias, res_mode; bool fullscreen; } BdspSettings;
 extern BdspSettings g_settings;

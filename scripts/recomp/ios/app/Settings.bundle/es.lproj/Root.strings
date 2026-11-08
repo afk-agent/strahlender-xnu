@@ -20,7 +20,7 @@
 "NOTIFY_WARNINGS" = "Avisos de partidas y copias";
 "NOTIFY_VERIFICATION" = "Estado de verificación completa";
 "ASPECT_GROUP" = "Imagen";
-"ASPECT_FOOTER" = "Relación de aspecto y resolución de renderizado del juego. El juego dibuja de forma nativa con esta forma, sin estirar ni recortar. «Forma de pantalla» se ajusta exactamente a este dispositivo; «Nativa» renderiza con la altura en píxeles de la pantalla (más pesado). Se aplica al reiniciar la app. Predeterminado: 16:9, 1080p. Escalado: MetalFX enfoca la imagen cuando la altura de renderizado es menor que la de la pantalla (720p o 1080p en un iPad).";
+"ASPECT_FOOTER" = "Relación de aspecto y resolución de renderizado del juego. El juego dibuja de forma nativa con esta forma, sin estirar ni recortar. «Forma de pantalla» se ajusta exactamente a este dispositivo; «Nativa» renderiza con la altura en píxeles de la pantalla (más pesado). Se aplica al reiniciar la app. Predeterminado: 16:9, 1080p. Escalado: MetalFX enfoca la imagen cuando la altura de renderizado es menor que la de la pantalla (720p o 1080p en un iPad). MetalFX temporal combina varios fotogramas: más nítido y sin dientes de sierra (720p se acerca a 1080p), con más carga de GPU.";
 "ASPECT_TITLE" = "Relación de aspecto";
 "ASPECT_169" = "16:9 (original)";
 "ASPECT_AUTO" = "Forma de pantalla";
@@ -35,4 +35,5 @@
 "RENDER_AUTO" = "Nativa (píxeles de pantalla)";
 "UPSCALER_TITLE" = "Escalado";
 "UPSCALER_OFF" = "Desactivado (bilineal)";
-"UPSCALER_METALFX" = "MetalFX";
+"UPSCALER_METALFX" = "MetalFX espacial";
+"UPSCALER_TEMPORAL" = "MetalFX temporal";

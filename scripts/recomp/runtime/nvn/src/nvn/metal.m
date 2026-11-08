@@ -855,10 +855,16 @@ static void save_png(id<MTLTexture> tex, const char *path) { renderer_save_textu
 // MetalFX spatial upscaling (setting "upscaler", Mac View menu / iPad Settings): metalfx_scale.h
 #define METALFX_LOG LOG
 #include "metalfx_scale.h"
+#include "metalfx_temporal.h"
+// (the temporal setting falls back to the spatial scaler for a frame the temporal one cannot take)
 static id<MTLTexture> metalfx_upscale(id<MTLTexture> in, double ow_d, double oh_d) {
-    if (__atomic_load_n(&g_settings.upscaler, __ATOMIC_RELAXED) != UPSCALE_METALFX) return nil;
+    int u = __atomic_load_n(&g_settings.upscaler, __ATOMIC_RELAXED);
+    if (u != UPSCALE_METALFX && u != UPSCALE_METALFX_TEMPORAL) return nil;
     return metalfx_prepare(dev, in, ow_d, oh_d);
 }
+// The scene's target is upside down relative to the presented image: Unity draws render textures that way on this platform and its
+// final blit turns them (seen in BDSP_DEBUG_FRAME pass dumps: every scene target, against the presented image). BDSP_TAA_FLIP=0 if not.
+static bool taa_scene_flipped(void) { static int f = -1; if (f < 0) f = !getenv("BDSP_TAA_FLIP") || atoi(getenv("BDSP_TAA_FLIP")) != 0; return f; }
 // SMAA 1x (Video tab "Anti-aliasing"; third_party/smaa, MIT; as runtime/nvn/vulkan/shaders.c / exec.c): luma edges ->
 // blending weights -> neighbourhood blending, at the game image's size, before the present / MetalFX. The reference
 // SMAA.hlsl has no Metal mode: it is built through its SMAA_CUSTOM_SL porting macros, with a few textual fixes for
@@ -1265,6 +1271,10 @@ void metal_repeat_present(void) {
 static bool present_gpu_locked(uint64_t frame, id<MTLTexture> tex, bool has_wc, const float wc[4], bool repeat) {
     extern void renderer_submit(void);
     if (!repeat) renderer_submit();  // same queue: the present pass runs after the frame's work
+    // MetalFX temporal (taa.inc): the frame's jitter, motion and depth; every new frame ends the renderer's frame here, also one
+    // without a drawable
+    TaaFrame taa_frame = {0};
+    if (!repeat) renderer_taa_frame(tex, tex ? (uint32_t)tex.width : 0, tex ? (uint32_t)tex.height : 0, &taa_frame);
     @autoreleasepool {
         uint64_t nd0 = SDL_GetTicksNS();
         id<CAMetalDrawable> drawable = [layer nextDrawable];
@@ -1314,12 +1324,26 @@ static bool present_gpu_locked(uint64_t frame, id<MTLTexture> tex, bool has_wc, 
         // The passes that prepare the image run before the drawable's pass, so that pass only clears, draws and stores the drawable
         // (no store and reload of the whole drawable around them, which costs a tile GPU two full-screen memory passes).
         if (draw) {
+            bool temporal = __atomic_load_n(&g_settings.upscaler, __ATOMIC_RELAXED) == UPSCALE_METALFX_TEMPORAL;
             // SMAA (Video tab "Anti-aliasing"): first, at the game image's size (MetalFX then upscales its result)
-            if (g_settings.antialias == AA_SMAA) src = smaa_encode(cb, src);
-            // MetalFX (setting "upscaler", metalfx_scale.h): when the game image is smaller than its place in the window, Apple's
+            if (g_settings.antialias == AA_SMAA && !temporal) src = smaa_encode(cb, src);
+            // MetalFX temporal (setting "upscaler" = temporal, metalfx_temporal.h): the jittered frames with the scene's motion and
+            // depth give an image of the window's size (at least the image's own: anti-aliasing). A repeated present reuses it.
+            id<MTLTexture> up = nil;
+            if (temporal && (repeat || taa_frame.active)) {
+                float scale = 1;
+                if (repeat) up = metalfx_temporal_encode(cb, src, nil, NULL, false, frame);
+                else if (metalfx_temporal_prepare(dev, src, vw / crop[2], vh / crop[3], &scale)) {
+                    id<MTLTexture> copy = taa_frame.copy ? raw_view(taa_frame.copy) : nil;
+                    up = metalfx_temporal_encode(cb, src, copy, &taa_frame, taa_scene_flipped(), frame);
+                }
+                if (!repeat) renderer_taa_status(up != nil, scale);   // (no jitter while the scaler cannot run)
+            }
+            // MetalFX spatial (setting "upscaler", metalfx_scale.h): when the game image is smaller than its place in the window, Apple's
             // spatial upscaler brings it to the window's size first (the whole image, so the interior crop below still applies); the
             // present pass then samples it about 1:1. A repeated present of the same frame reuses the image already scaled.
-            if (metalfx_upscale(src, vw / crop[2], vh / crop[3])) src = metalfx_encode(cb, src, frame);
+            if (up) src = up;
+            else if (metalfx_upscale(src, vw / crop[2], vh / crop[3])) src = metalfx_encode(cb, src, frame);
         }
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = drawable.texture;

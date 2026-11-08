@@ -195,11 +195,13 @@
 			<array>
 				<string>UPSCALER_OFF</string>
 				<string>UPSCALER_METALFX</string>
+				<string>UPSCALER_TEMPORAL</string>
 			</array>
 			<key>Values</key>
 			<array>
 				<string>off</string>
 				<string>metalfx</string>
+				<string>temporal</string>
 			</array>
 		</dict>
 		<dict>

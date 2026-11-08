@@ -67,6 +67,7 @@ typedef struct {
     uint32_t in_attr_mask, out_attr_mask;
     uint32_t vs_in_comp[32];
     bool uses_branches, uses_cc, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane;
+    bool lod_bias_used;      // XNU: a sample got the MetalFX temporal upscaler's level-of-detail bias (ShaderKey.lod_bias)
     bool uses_rscale;  // resolution-scale table (fragment/compute only)
     uint64_t cur_word; // XNU: instruction being translated (for survey records)
     Survey *sv;        // XNU: coverage mode: collect problems instead of failing at the first one (NULL = original behaviour)
@@ -937,6 +938,11 @@ static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
             sprintf(call, "t%d.sample(s%d, float3(%s, %s, %s), level(%s))", slot, slot, F(A), F(A1), F(Bv), F(B1)); break;
         default: fail(c, "texs info %d", info); return;
         }
+        // XNU: level-of-detail bias of the temporal upscaler on implicit-lod samples (not 1D: no mipmaps)
+        if (c->key && c->key->lod_bias && c->stage == STAGE_FRAGMENT && (info == 1 || info == 7 || info == 10 || info == 12)) {
+            size_t n = strlen(call);
+            if (n > 1 && call[n - 1] == ')' && n + 16 < sizeof call) { strcpy(call + n - 1, ", bias(mvf.x))"); c->lod_bias_used = true; }
+        }
     } else {
         switch (info) {
         case 0: slot = tex_slot(c, index, TEXTYPE_1D, false, false);
@@ -1023,6 +1029,12 @@ static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
         pr++;
     } else if (lod_mode == 1) {
         strcpy(lod, ", level(0)");
+    }
+    // XNU: level-of-detail bias of the temporal upscaler (implicit or biased lod; not depth compares, not 1D)
+    if (c->key && c->key->lod_bias && c->stage == STAGE_FRAGMENT && !dc && ncoord >= 2 && (lod_mode == 0 || lod_mode == 2 || lod_mode == 6)) {
+        if (lod_mode == 0) strcpy(lod, ", bias(mvf.x)");
+        else sprintf(lod, ", bias(as_type<float>(r%d) + mvf.x)", pr - 1);
+        c->lod_bias_used = true;
     }
     if (aoffi) {
         c->reg_used[pr] = 1;
@@ -2233,6 +2245,14 @@ ShaderInfo *maxwell_translate_ex(const uint8_t *blob, size_t max_size, int stage
     if (c->glsl) return glsl_finish(c, any_branch);
 
     // ---------------------------------------------------------- MSL source
+    // XNU: MetalFX temporal upscaler variants (ShaderKey.motion, see shader.h)
+    int mv_rt = -1;          // fragment: colour attachment of the motion output
+    bool mv_vs = false;      // vertex: two runs and the jitter
+    if (key && key->motion && stage == STAGE_VERTEX)
+        mv_vs = !c->uses_gmem_store && !(info->cbuf_mask & ((1u << MV_PARAMS_BUFFER_INDEX) | (1u << MV_PREV_BUFFER_INDEX)));
+    if (key && key->motion > 0 && key->motion <= 8 && stage == STAGE_FRAGMENT && !((c->omap_target >> ((key->motion - 1) * 4)) & 0xF))
+        mv_rt = key->motion - 1;
+    info->motion_written = mv_vs || mv_rt >= 0;
     Str s = {0};
     // XNU: exact arithmetic. Metal's default (fast math, FMA contraction) changes results compared with the original
     // GPU, which rounds every FMUL and FADD separately; the pragmas are accepted by the Metal compiler of macOS 26 also
@@ -2267,6 +2287,7 @@ ShaderInfo *maxwell_translate_ex(const uint8_t *blob, size_t max_size, int stage
         for (int i = 0; i < 32; i++)
             if (c->out_attr_mask & (1u << i)) sp(&s, "  float4 v%d [[user(locn%d)]];\n", i, i);
         if (info->writes_point_size) sp(&s, "  float psize [[point_size]];\n");
+        if (mv_vs) sp(&s, "  float4 mvc [[user(mvc)]];\n  float4 mvp [[user(mvp)]];\n");  // XNU: clip positions without jitter
         sp(&s, "};\n");
     } else if (stage == STAGE_FRAGMENT) {
         sp(&s, "struct FIn {\n  float4 pos [[position]];\n");
@@ -2275,6 +2296,7 @@ ShaderInfo *maxwell_translate_ex(const uint8_t *blob, size_t max_size, int stage
             const char *interp = (c->flat_mask & (1u << i)) ? " [[flat]]" : (c->noperspective_mask & (1u << i)) ? " [[center_no_perspective]]" : "";
             sp(&s, "  float4 v%d [[user(locn%d)]]%s;\n", i, i, interp);
         }
+        if (mv_rt >= 0) sp(&s, "  float4 mvc [[user(mvc)]];\n  float4 mvp [[user(mvp)]];\n");
         sp(&s, "};\n");
         sp(&s, "struct FOut {\n");
         for (int rt = 0; rt < 8; rt++) {
@@ -2283,13 +2305,21 @@ ShaderInfo *maxwell_translate_ex(const uint8_t *blob, size_t max_size, int stage
             sp(&s, "  %s4 c%d [[color(%d)]];\n", kind == 1 ? "int" : kind == 2 ? "uint" : "float", rt, rt);
         }
         if (c->omap_depth) { sp(&s, "  float depth [[depth(any)]];\n"); info->writes_depth = true; }
+        if (mv_rt >= 0) sp(&s, "  float4 mv [[color(%d)]];\n", mv_rt);
         sp(&s, "};\n");
     }
 
     // entry point
     Str args = {0};
+    Str hdecl = {0}, hcall = {0}, hcallp = {0};  // XNU (mv_vs): parameters of the body function, its call with this / the previous frame's cbufs
     for (int i = 0; i < 18; i++)
-        if (info->cbuf_mask & (1u << i)) sp(&args, ", constant uint4 *cb%d [[buffer(%d)]]", i, i);
+        if (info->cbuf_mask & (1u << i)) {
+            sp(&args, ", constant uint4 *cb%d [[buffer(%d)]]", i, i);
+            sp(&hdecl, ", constant uint4 *cb%d", i);
+            sp(&hcall, ", cb%d", i);
+            if (i >= 3 && i < 16) sp(&hcallp, ", mvp.off[%d] != 0xffffffffu ? (constant uint4 *)(mvprev + mvp.off[%d]) : cb%d", i, i, i);
+            else sp(&hcallp, ", cb%d", i);
+        }
     if (info->uses_gmem) {
         if (info->cbuf_mask & (1u << GMEM_BUFFER_INDEX)) {
             free(args.buf);
@@ -2297,18 +2327,33 @@ ShaderInfo *maxwell_translate_ex(const uint8_t *blob, size_t max_size, int stage
             fail(c, "cbuf %d clashes with gmem", GMEM_BUFFER_INDEX);
         }
         sp(&args, ", device uchar *gmem [[buffer(%d)]]", GMEM_BUFFER_INDEX);
+        sp(&hdecl, ", device uchar *gmem"); sp(&hcall, ", gmem"); sp(&hcallp, ", gmem");
     }
     if (c->uses_rscale && stage != STAGE_VERTEX) {
         sp(&args, ", constant float4 *rscale [[buffer(18)]]");
         info->uses_rscale = true;
+    }
+    if (c->lod_bias_used && stage == STAGE_FRAGMENT) {   // XNU (ShaderKey.lod_bias)
+        if (info->cbuf_mask & (1u << MV_PARAMS_BUFFER_INDEX)) fail(c, "cbuf %d clashes with the lod bias", MV_PARAMS_BUFFER_INDEX);
+        sp(&args, ", constant float4 &mvf [[buffer(%d)]]", MV_PARAMS_BUFFER_INDEX);
+        info->uses_lod_bias = true;
     }
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
         const char *tn = tex_type_name(t->type);
         if (t->shadow) sp(&args, ", depth%s<float> t%d [[texture(%d)]], sampler s%d [[sampler(%d)]]", tn, i, i, i, i);
         else sp(&args, ", texture%s<float> t%d [[texture(%d)]], sampler s%d [[sampler(%d)]]", tn, i, i, i, i);
+        sp(&hdecl, ", %s%s<float> t%d, sampler s%d", t->shadow ? "depth" : "texture", tn, i, i);
+        sp(&hcall, ", t%d, s%d", i, i);
+        sp(&hcallp, ", t%d, s%d", i, i);
     }
-    if (stage == STAGE_VERTEX) {
+    if (stage == STAGE_VERTEX && mv_vs) {
+        // XNU: the translated body becomes a function that the entry point calls twice (the compiler keeps only what the second
+        // call needs for its position)
+        sp(&s, "struct MvParams { float4 jitter; uint off[16]; };\n");
+        sp(&s, "static inline VOut vs_body(VIn in, uint vid, uint iid%s) {\n", hdecl.buf ? hdecl.buf : "");
+        sp(&s, "  VOut out = {};\n  out.pos = float4(0, 0, 0, 1);\n");
+    } else if (stage == STAGE_VERTEX) {
         sp(&s, "vertex VOut main0(VIn in [[stage_in]], uint vid [[vertex_id]], uint iid [[instance_id]]%s%s) {\n",
            args.buf ? args.buf : "", key && key->dbg_pos ? ", device float4 *dbgpos [[buffer(29)]]" : "");
         sp(&s, "  VOut out = {};\n  out.pos = float4(0, 0, 0, 1);\n");
@@ -2321,7 +2366,8 @@ ShaderInfo *maxwell_translate_ex(const uint8_t *blob, size_t max_size, int stage
         sp(&s, "kernel void main0(uint3 tid [[thread_position_in_threadgroup]], uint3 ctaid [[threadgroup_position_in_grid]]%s) {\n",
            args.buf ? args.buf : "");
     }
-    free(args.buf);
+    if (!mv_vs) free(args.buf);  // (the motion variant's entry point, written after the body, still needs it)
+    free(hdecl.buf);
     for (int i = 0; i < 256; i++)
         if (c->reg_used[i]) sp(&s, "  uint r%d = 0;\n", i);
     for (int i = 0; i < 255; i++)
@@ -2349,7 +2395,20 @@ ShaderInfo *maxwell_translate_ex(const uint8_t *blob, size_t max_size, int stage
     } else {
         sp(&s, "  do {\n%s  } while (false);\n", c->body.buf ? c->body.buf : "");
     }
-    if (stage == STAGE_VERTEX) {
+    if (stage == STAGE_VERTEX && mv_vs) {
+        sp(&s, "  return out;\n}\n");
+        sp(&s, "vertex VOut main0(VIn in [[stage_in]], uint vid [[vertex_id]], uint iid [[instance_id]]%s%s, constant MvParams &mvp [[buffer(%d)]], constant uchar *mvprev [[buffer(%d)]]) {\n",
+           args.buf ? args.buf : "", key->dbg_pos ? ", device float4 *dbgpos [[buffer(29)]]" : "", MV_PARAMS_BUFFER_INDEX, MV_PREV_BUFFER_INDEX);
+        sp(&s, "  VOut out = vs_body(in, vid, iid%s);\n", hcall.buf ? hcall.buf : "");
+        sp(&s, "  float4 prev = vs_body(in, vid, iid%s).pos;\n", hcallp.buf ? hcallp.buf : "");
+        if (key->flip_y) sp(&s, "  out.pos.y = -out.pos.y; prev.y = -prev.y;\n");
+        if (key->flip_x) sp(&s, "  out.pos.x = -out.pos.x; prev.x = -prev.x;\n");
+        if (key->depth_minus_one) sp(&s, "  out.pos.z = (out.pos.z + out.pos.w) * 0.5f;\n");
+        sp(&s, "  out.mvc = out.pos;\n  out.mvp = prev;\n  out.pos.xy += mvp.jitter.xy * out.pos.w;\n");
+        if (key->dbg_pos) sp(&s, "  if (vid < 4096 && iid < 8) dbgpos[iid * 4096 + vid] = out.pos;\n");
+        sp(&s, "  return out;\n}\n");
+        free(args.buf);
+    } else if (stage == STAGE_VERTEX) {
         if (key && key->flip_y) sp(&s, "  out.pos.y = -out.pos.y;\n");
         if (key && key->flip_x) sp(&s, "  out.pos.x = -out.pos.x;\n");
         if (key && key->depth_minus_one) sp(&s, "  out.pos.z = (out.pos.z + out.pos.w) * 0.5f;\n");
@@ -2377,10 +2436,13 @@ ShaderInfo *maxwell_translate_ex(const uint8_t *blob, size_t max_size, int stage
             if (c->reg_used[r + 1]) sp(&s, "  o.depth = as_type<float>(r%d);\n", r + 1);
             else sp(&s, "  o.depth = in.pos.z;\n");
         }
+        // XNU: screen motion, previous - current position in uv units of the target (y down)
+        if (mv_rt >= 0) sp(&s, "  o.mv = float4((in.mvp.xy / in.mvp.w - in.mvc.xy / in.mvc.w) * float2(0.5f, -0.5f), 0, 0);\n");
         sp(&s, "  return o;\n}\n");
     } else {
         sp(&s, "  return;\n}\n");
     }
+    free(hcall.buf); free(hcallp.buf);
     info->msl = s.buf;
     info->flat_mask = c->flat_mask;  // XNU: for the resource map
     info->noperspective_mask = c->noperspective_mask;
