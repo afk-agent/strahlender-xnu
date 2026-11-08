@@ -156,8 +156,8 @@ check_ffmpeg() {
 
 check_xcode() {
   local v
-  [ -d /Applications/Xcode.app ] || { miss "Xcode at /Applications/Xcode.app"; return 1; }
-  [ -d "$DEVELOPER_DIR" ] || { miss "DEVELOPER_DIR=$DEVELOPER_DIR does not exist"; return 1; }
+  # DEVELOPER_DIR (default /Applications/Xcode.app/Contents/Developer, line 41) may name an Xcode elsewhere, as every later step allows
+  [ -d "$DEVELOPER_DIR" ] || { miss "Xcode: DEVELOPER_DIR=$DEVELOPER_DIR does not exist (install Xcode in /Applications or set DEVELOPER_DIR)"; return 1; }
   v="$(xcodebuild -version 2>/dev/null | sed -n '1,2p' | tr '\n' ' ')" || true
   [ -n "$v" ] || { miss "Xcode: xcodebuild does not run (license accepted? 'xcodebuild -license')"; return 1; }
   ok "Xcode ($v, DEVELOPER_DIR=$DEVELOPER_DIR)"
