@@ -20,7 +20,7 @@
 "NOTIFY_WARNINGS" = "Hinweise zu Saves und Backups";
 "NOTIFY_VERIFICATION" = "Status der vollständigen Datenprüfung";
 "ASPECT_GROUP" = "Bild";
-"ASPECT_FOOTER" = "Seitenverhältnis und Renderauflösung des Spiels. Das Spiel zeichnet nativ in dieser Form, ohne Streckung und ohne abgeschnittene Fläche. „Bildschirmform“ passt genau zu diesem Gerät; „Nativ“ rendert in der Pixelhöhe des Bildschirms (aufwendiger). Wirkt nach einem Neustart der App. Standard: 16:9, 1080p. Hochskalierung: MetalFX schärft das Bild, wenn die Renderhöhe unter der des Bildschirms liegt (720p oder 1080p auf einem iPad).";
+"ASPECT_FOOTER" = "Seitenverhältnis und Renderauflösung des Spiels. Das Spiel zeichnet nativ in dieser Form, ohne Streckung und ohne abgeschnittene Fläche. „Bildschirmform“ passt genau zu diesem Gerät; „Nativ“ rendert in der Pixelhöhe des Bildschirms (aufwendiger). Wirkt nach einem Neustart der App. Standard: 16:9, 1080p. Hochskalierung: MetalFX schärft das Bild, wenn die Renderhöhe unter der des Bildschirms liegt (720p oder 1080p auf einem iPad). MetalFX temporal verbindet mehrere Bilder: schärfer und geglättet (720p kommt 1080p nahe), bei höherer GPU-Last.";
 "ASPECT_TITLE" = "Seitenverhältnis";
 "ASPECT_169" = "16:9 (Original)";
 "ASPECT_AUTO" = "Bildschirmform";
@@ -35,4 +35,5 @@
 "RENDER_AUTO" = "Nativ (Bildschirmpixel)";
 "UPSCALER_TITLE" = "Hochskalierung";
 "UPSCALER_OFF" = "Aus (bilinear)";
-"UPSCALER_METALFX" = "MetalFX";
+"UPSCALER_METALFX" = "MetalFX räumlich";
+"UPSCALER_TEMPORAL" = "MetalFX temporal";

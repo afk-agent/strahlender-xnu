@@ -20,7 +20,7 @@
 "NOTIFY_WARNINGS" = "Save and backup warnings";
 "NOTIFY_VERIFICATION" = "Full verification status";
 "ASPECT_GROUP" = "Picture";
-"ASPECT_FOOTER" = "Aspect ratio and render resolution of the game. The game draws natively at this shape with no stretching and no cropped area. \"Screen shape\" fits this device exactly; \"Native\" renders at the screen's own pixel height (heavier). Takes effect after restarting the app. Default: 16:9, 1080p. Upscaler: MetalFX sharpens the picture when the render height is below the screen's (720p or 1080p on an iPad).";
+"ASPECT_FOOTER" = "Aspect ratio and render resolution of the game. The game draws natively at this shape with no stretching and no cropped area. \"Screen shape\" fits this device exactly; \"Native\" renders at the screen's own pixel height (heavier). Takes effect after restarting the app. Default: 16:9, 1080p. Upscaler: MetalFX Spatial sharpens the picture (cheap) when the render height is below the screen's (720p or 1080p on an iPad). MetalFX Temporal combines several frames: sharper and anti-aliased (720p comes close to 1080p), at a higher GPU cost.";
 "ASPECT_TITLE" = "Aspect ratio";
 "ASPECT_169" = "16:9 (original)";
 "ASPECT_AUTO" = "Screen shape";
@@ -35,4 +35,5 @@
 "RENDER_AUTO" = "Native (screen pixels)";
 "UPSCALER_TITLE" = "Upscaler";
 "UPSCALER_OFF" = "Off (bilinear)";
-"UPSCALER_METALFX" = "MetalFX";
+"UPSCALER_METALFX" = "MetalFX Spatial";
+"UPSCALER_TEMPORAL" = "MetalFX Temporal";

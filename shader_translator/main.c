@@ -38,6 +38,7 @@ static void usage(FILE *f) {
         "  --vs-out-mask <hex>   fragment: varyings the vertex shader writes (0 = unknown, all inputs kept)\n"
         "  --flip-y              negate clip y in the vertex shader\n"
         "  --depth-minus-one     remap clip z from [-1,1] to [0,1]\n"
+        "  --motion N            MetalFX temporal variant (vertex: 1; fragment: 1 + colour attachment of the motion output)\n"
         "  --rscale              keep the resolution-scale table of the original (default: plain coordinates)\n"
         "  --glsl                emit Vulkan GLSL instead of MSL\n"
         "  --lang msl|glsl       output language (default msl)\n"
@@ -350,6 +351,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--vs-out-mask")) o.key.vs_out_mask = (uint32_t)strtoul(NEED_ARG(), NULL, 16);
         else if (!strcmp(a, "--flip-y")) o.key.flip_y = true;
         else if (!strcmp(a, "--depth-minus-one")) o.key.depth_minus_one = true;
+        else if (!strcmp(a, "--motion")) o.key.motion = (uint8_t)atoi(NEED_ARG());
         else if (!strcmp(a, "--rscale")) o.key.no_rscale = false;
         else if (!strcmp(a, "--glsl")) o.key.glsl = 1;
         else if (!strcmp(a, "--lang")) {

@@ -47,5 +47,5 @@ int bdsp_app_pick_game(const char *const *names, int n, int preselect, int *ask_
 extern volatile int g_bdsp_paused;   // services_gfx.c: stops the vsync event
 extern volatile int g_bdsp_fps;      // services_gfx.c: frame rate 30/60/120
 void bdsp_set_fps(int fps);          // invalid values are ignored
-void bdsp_set_upscaler(int on);     // nvn_glue.c: MetalFX upscaling of the presented image on (1) or off (0), effective at once
+void bdsp_set_upscaler(int mode);   // nvn_glue.c: upscaler of the presented image, 0 off, 1 MetalFX spatial, 2 MetalFX temporal; at once
 int bdsp_upscaler(void);

@@ -9,6 +9,16 @@ MTLPixelFormat renderer_pixel_format(uint32_t nvn_format);
 bool renderer_format_alpha_one(uint32_t nvn_format);
 extern id<MTLBuffer> g_guest_buffer;
 extern uint64_t g_guest_buffer_base;
+// MetalFX temporal upscaler (taa.inc): what the present needs to scale the frame's presented image
+typedef struct {
+    bool active;                 // the frame was jittered
+    __unsafe_unretained id<MTLTexture> motion, depth, copy;   // scene motion and depth (nil: none this frame); the presented
+                                                              // image before the HUD (nil: nothing drawn over the scene)
+    float jitter_x, jitter_y;    // content shift in pixels, y down in the scene's target
+    bool depth_reversed;
+} TaaFrame;
+void renderer_taa_frame(id<MTLTexture> tex, uint32_t gw, uint32_t gh, TaaFrame *out);
+void renderer_taa_status(bool ok, float out_scale);
 #endif
 #include <SDL3/SDL_events.h>
 

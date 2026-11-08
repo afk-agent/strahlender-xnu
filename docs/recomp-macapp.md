@@ -60,8 +60,9 @@ DualShock, DualSense, Xbox) and is the only controller layer on Apple platforms
 positions; for other pads the default layout follows physical positions and
 `pad_layout = xbox` follows labels. Stick dead zone is 12%.
 The view preserves 16:9 with letterboxing, default 1280×720, minimum 640×360.
-View > Upscaler > MetalFX (or `upscaler = metalfx` in `config.ini`) sharpens a render image smaller than the window with
-Apple's MetalFX spatial upscaler (`docs/rendering.md`, section 8).
+View > Upscaler > MetalFX Spatial (or `upscaler = metalfx` in `config.ini`) sharpens a render image smaller than the window with
+Apple's MetalFX spatial upscaler (`docs/rendering.md`, section 8); View > Upscaler > MetalFX Temporal (`upscaler = temporal`) combines
+jittered frames into a sharper, anti-aliased picture at a higher GPU cost (section 9).
 
 In the historical controller mapping, Menu/Start meant +, View/Options meant
 −, shoulder buttons meant L/R, triggers meant ZL/ZR, and multiple connected

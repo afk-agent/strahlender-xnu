@@ -297,6 +297,56 @@ static void test_varying_nan(void) {
     maxwell_free(s);
 }
 
+// XNU: MetalFX temporal variants (ShaderKey.motion). The vertex shader becomes a function the entry point runs twice (this
+// frame's and the previous frame's constant buffers), the fragment shader writes the motion to the requested attachment.
+static void test_motion_variants(void) {
+    const uint64_t w = W_MOV_C2_168_R11, bank = (w >> 34) & 0x1f;
+    const uint64_t mov_c3 = (w & ~(0x1full << 34)) | (3ull << 34);  // MOV R11, c[3][0x168]
+    CHECK(bank == 2);
+    const uint64_t code[] = {W_SCHED, mov_c3, W_EXIT, W_BRA_SELF_8};
+    size_t size;
+    uint8_t *b = make_blob(code, 4, &size, 1);
+    ShaderKey key = {0};
+    key.no_rscale = true;
+    key.flip_y = true;
+    key.motion = 1;
+    ShaderInfo *s = maxwell_translate(b, size, STAGE_VERTEX, &key);
+    CHECK(s->msl && s->motion_written);
+    CHECK(s->msl && strstr(s->msl, "static inline VOut vs_body(VIn in, uint vid, uint iid, constant uint4 *cb3)"));
+    CHECK(s->msl && strstr(s->msl, "VOut out = vs_body(in, vid, iid, cb3);"));
+    CHECK(s->msl && strstr(s->msl, "mvp.off[3] != 0xffffffffu ? (constant uint4 *)(mvprev + mvp.off[3]) : cb3"));
+    CHECK(s->msl && strstr(s->msl, "out.pos.y = -out.pos.y; prev.y = -prev.y;"));
+    CHECK(s->msl && strstr(s->msl, "out.pos.xy += mvp.jitter.xy * out.pos.w;"));
+    CHECK(s->msl && strstr(s->msl, "float4 mvc [[user(mvc)]];"));
+    maxwell_free(s);
+    key.motion = 0;
+    s = maxwell_translate(b, size, STAGE_VERTEX, &key);
+    CHECK(s->msl && !s->motion_written && !strstr(s->msl, "vs_body") && !strstr(s->msl, "mvc"));
+    maxwell_free(s);
+    key.motion = 1 + 2;  // fragment: motion to attachment 2
+    s = maxwell_translate(b, size, STAGE_FRAGMENT, &key);
+    CHECK(s->msl && s->motion_written);
+    CHECK(s->msl && strstr(s->msl, "float4 mv [[color(2)]];"));
+    CHECK(s->msl && strstr(s->msl, "o.mv = float4((in.mvp.xy / in.mvp.w - in.mvc.xy / in.mvc.w) * float2(0.5f, -0.5f), 0, 0);"));
+    maxwell_free(s);
+    free(b);
+    // level-of-detail bias: an implicit-lod 2D sample (TEXS info 1) of a fragment shader gets bias(mvf.x) and the buffer
+    const uint64_t texs[] = {W_SCHED, 0xd822000000000000ull | (1ull << 53) | (1ull << 50) | (8ull << 28) | (8ull << 0), W_EXIT, W_BRA_SELF_8};
+    b = make_blob(texs, 4, &size, 1);
+    key = (ShaderKey){0};
+    key.no_rscale = true;
+    s = maxwell_translate(b, size, STAGE_FRAGMENT, &key);
+    CHECK(s->msl && !s->uses_lod_bias && !strstr(s->msl, "mvf"));
+    bool sampled = s->msl && strstr(s->msl, ".sample(") != NULL;
+    maxwell_free(s);
+    key.lod_bias = 1;
+    s = maxwell_translate(b, size, STAGE_FRAGMENT, &key);
+    CHECK(!sampled || (s->msl && s->uses_lod_bias && strstr(s->msl, ", bias(mvf.x))") && strstr(s->msl, "constant float4 &mvf [[buffer(15)]]")));
+    if (!sampled) fprintf(stderr, "note: test_motion_variants: the TEXS word did not decode as a sample\n");
+    maxwell_free(s);
+    free(b);
+}
+
 // ---------------------------------------------------------------- container
 static size_t put32(uint8_t *b, size_t o, uint32_t v) {
     memcpy(b + o, &v, 4);
@@ -374,6 +424,7 @@ int main(void) {
     test_input_checks();
     test_no_rscale_flag();
     test_varying_nan();
+    test_motion_variants();
     test_container();
     printf("test_translate: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

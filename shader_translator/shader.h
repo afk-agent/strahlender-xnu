@@ -52,7 +52,20 @@ typedef struct {
     bool fast_math;         // XNU: MSL without the pragmas that disable fast math and FMA contraction (original behaviour)
     bool half_compat;       // XNU: Ryujinx-compatible half precision: no rounding to fp16 between half operations (see translate.c hstore)
     uint8_t dbg_pos;        // XNU debug (BDSP_GEOM_CHECK): vertex shaders also store their clip position to buffer(29)[iid * 4096 + vid]
+    // XNU: MetalFX temporal upscaler (MSL only; runtime/nvn/src/nvn/taa.inc). Vertex: 1 = the shader runs twice, with this frame's
+    // and with the previous frame's constant buffers (MV_PREV_BUFFER_INDEX at the offsets in MvParams; ~0u = this frame's buffer),
+    // writes both clip positions (varyings mvc, mvp) and moves its position by the frame's jitter (MvParams.jitter, clip units per w).
+    // Fragment: 1 + k = also writes the screen motion (previous - current, in uv units) to colour attachment k.
+    uint8_t motion;
+    // XNU: MetalFX temporal upscaler, fragment: samples with an implicit level of detail get an extra bias, MvParams-free float4 at
+    // MV_PARAMS_BUFFER_INDEX (.x): the jittered scene is drawn below the output resolution and textures keep the output's detail.
+    uint8_t lod_bias;
 } ShaderKey;
+
+// XNU: MetalFX temporal upscaler, vertex stage (ShaderKey.motion): per-draw parameters and the previous frame's constant buffers
+#define MV_PARAMS_BUFFER_INDEX 15
+#define MV_PREV_BUFFER_INDEX 16
+typedef struct { float jitter[4]; uint32_t off[16]; } MvParams;   // off[k]: byte offset of cbuf k in the previous-frame buffer
 
 typedef struct {
     uint32_t handle_offset;  // byte offset of the texture handle in the bound texture cbuf
@@ -95,6 +108,9 @@ typedef struct {
     uint32_t flat_mask, noperspective_mask;
     uint32_t local_mem;     // bytes of local memory
     uint32_t num_insts;
+    bool uses_lod_bias;     // XNU: ShaderKey.lod_bias applied (bind the bias at MV_PARAMS_BUFFER_INDEX of the fragment stage)
+    bool motion_written;    // XNU: the ShaderKey.motion variant was emitted (vertex: not with global memory stores or a cbuf in
+                            // slots 15/16; fragment: not when the shader itself writes colour k)
     char error[256];        // set when translation fails
 } ShaderInfo;
 

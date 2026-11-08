@@ -23,6 +23,7 @@ extern int maxwell_dbg_reg;
 #include "renderer.h"
 #include "movie_fit.h"
 #include "bctc.h"
+#include "settings.h"
 #include "exec_worker.inc"
 
 static id<MTLDevice> dev;
@@ -507,6 +508,12 @@ static id<MTLTexture> view_texture(NvnTexture *t, const NvnTextureView *v, bool 
     return got;
 }
 
+// MetalFX temporal upscaler (taa.inc, included further down): the motion attachment of a pass
+static int pass_mv_slot = -1;
+static void taa_begin_pass(MTLRenderPassDescriptor *rp);
+static void taa_attachment_format(MTLRenderPipelineDescriptor *pd);
+static void taa_note_clear(bool depth, float dval);
+
 // ------------------------------------------------------------------ render passes
 static __unsafe_unretained id last_bias_enc;  // encoder the depth bias was last set on
 
@@ -565,6 +572,7 @@ static void begin_pass(void) {
     static int chunk = -1;
     if (chunk < 0) { const char *e = ENV("BDSP_CHUNK_PASSES"); chunk = e ? atoi(e) : 8; }
     if (chunk > 0 && cmdbuf && ++g_passes_in_cb >= chunk) renderer_submit();
+    taa_begin_pass(rp);
     pt_attach_render(rp);
     enc = [cb() renderCommandEncoderWithDescriptor:rp];
     pt_name_encoder(enc);
@@ -667,6 +675,7 @@ static void attachment_formats(MTLRenderPipelineDescriptor *pd) {
         if (renderer_format_has_stencil(st.rt.depth->format)) pd.stencilAttachmentPixelFormat = pf;
     }
     pd.rasterSampleCount = pass_samples();
+    taa_attachment_format(pd);
 }
 
 static void clear(int index, int kind, const void *color, uint32_t mask, bool depth, float dval, bool stencil,
@@ -678,6 +687,7 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
         LOG("[clear] pass %d idx %d depth %d (%g) stencil %d | pass %dx%d scissor %d,%d %dx%d\n", debug_pass_no, index, depth,
             dval, stencil, pw, ph, st.scissor[0][0], st.scissor[0][1], st.scissor[0][2], st.scissor[0][3]);
     }
+    taa_note_clear(depth, dval);
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
     id<MTLLibrary> lib = clear_lib(index < 0 ? 0 : index);
     pd.vertexFunction = [lib newFunctionWithName:@"vs"];
@@ -695,10 +705,11 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
         pd.colorAttachments[index].writeMask = m;
     }
     NSError *err;
-    NSString *key = [NSString stringWithFormat:@"clear %d %d %u %d %d %lu %lu %lu %lu", index, kind, mask, depth, stencil,
+    NSString *key = [NSString stringWithFormat:@"clear %d %d %u %d %d %lu %lu %lu %lu %d", index, kind, mask, depth, stencil,
                      (unsigned long)pd.colorAttachments[index < 0 ? 0 : index].pixelFormat,
                      (unsigned long)pd.depthAttachmentPixelFormat, (unsigned long)pd.stencilAttachmentPixelFormat,
-                     (unsigned long)pd.rasterSampleCount];  // (the sample count must match the pass: 4x MSAA passes need their own pipelines)
+                     (unsigned long)pd.rasterSampleCount, pass_mv_slot];  // (the sample count must match the pass: 4x MSAA passes need their
+                                                                         // own pipelines; so does a pass with the motion attachment)
     id<MTLRenderPipelineState> pipe = cache[key];
     if (!pipe) {
         pipe = TIMED_COMPILE([dev newRenderPipelineStateWithDescriptor:pd error:&err]);
@@ -1400,13 +1411,15 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
     const uint8_t *vb = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    h ^= fkey->motion; h *= 0x100000001B3ull;
+    h ^= fkey->lod_bias; h *= 0x100000001B3ull;
     if (!h) h = 1;
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
     if (prog_tab[slot].key) { Prog *fp = (__bridge Prog *)prog_tab[slot].prog; return fp->failed ? nil : fp; }
-    NSString *key = [NSString stringWithFormat:@"%llx/%llx/%@/%@%s", p->stages[0].code_addr, p->stages[1].code_addr,
+    NSString *key = [NSString stringWithFormat:@"%llx/%llx/%@/%@%s/%u", p->stages[0].code_addr, p->stages[1].code_addr,
                      [NSData dataWithBytes:vkey length:sizeof *vkey], [NSData dataWithBytes:fkey->rt_kind length:8],
-                     vkey->flip_x ? "/mirror" : ""];  // (NSData's description elides the middle of the key's bytes)
+                     vkey->flip_x ? "/mirror" : "", fkey->motion | fkey->lod_bias << 8];  // (NSData's description elides the middle of the key's bytes)
     Prog *pr = cache[key];
     if (pr) {
         prog_tab[slot].key = h;
@@ -1449,6 +1462,7 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
         return nil;
     }
     fkey->vs_out_mask = pr->vi->out_mask;
+    if (!pr->vi->motion_written) fkey->motion = 0;   // (taa.inc: the motion output needs the vertex variant's varyings)
     pr->fi = maxwell_translate((const uint8_t *)(uintptr_t)p->stages[1].code_addr, fmax, STAGE_FRAGMENT, fkey);
     if (!pr->fi->msl) { LOG("[shader] FS translate failed: %s\n", pr->fi->error); pr->failed = true; return nil; }
     if (getenv("BDSP_SAVE_MSL")) {
@@ -2183,6 +2197,8 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
 // boot generation (a build still in flight can't land on a new function at a reused address).
 static unsigned g_boot_gen;
 
+#include "taa.inc"  // MetalFX temporal upscaler: jitter, motion, the previous frame's constant buffers
+
 static uint64_t hmix(uint64_t h, const void *p, size_t n) {
     const uint8_t *b = p;
     for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
@@ -2211,6 +2227,7 @@ static uint64_t pipeline_state_hash(Prog *pr) {
     h = hmix(h, &st.channel_mask, sizeof st.channel_mask);
     h = hmix(h, &st.color_state[0], sizeof st.color_state[0]);
     h = hmix(h, &st.ms[0xC], 1);
+    h = hmix(h, &pass_mv_slot, sizeof pass_mv_slot);
     return h ? h : 1;
 }
 
@@ -2255,6 +2272,12 @@ static void rec_from_state(const Prog *pr, uint32_t used_streams, PipeRec *r) {
         uint32_t pf = (uint32_t)renderer_pixel_format(st.rt.depth->format);
         if (renderer_format_is_depth(st.rt.depth->format) && st.rt.depth->format != 0x31) r->depth_fmt = pf;
         if (renderer_format_has_stencil(st.rt.depth->format)) r->stencil_fmt = pf;
+    }
+    if (pass_mv_slot >= 0 && pass_mv_slot < 8) {   // the motion attachment (taa.inc); written by the motion variant only
+        r->ncolor = pass_mv_slot + 1;
+        r->ca[pass_mv_slot].present = 1;
+        r->ca[pass_mv_slot].fmt = MTLPixelFormatRG16Float;
+        r->ca[pass_mv_slot].wmask = pr->fi->motion_written ? MTLColorWriteMaskRed | MTLColorWriteMaskGreen : MTLColorWriteMaskNone;
     }
     uint32_t ps = pass_samples();
     r->samples = ps > 1 ? ps : 0;  // (0 for single-sample: the manifest's keys stay valid)
@@ -2499,8 +2522,13 @@ static void draw(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
     GeomState geom = geom_state(&vkey);  // render_debug.inc: BDSP_GEOM_CHECK
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
+    if (taa.on) taa_keys(&vkey, &fkey);  // taa.inc: jitter / motion variants
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr || !pr->ready) { stat_skipped++; return; }
+    if (vkey.motion && !pr->vi->motion_written && getenv("BDSP_TAA_LOG")) {   // (taa.inc: a vertex shader without the jitter variant)
+        static int n;
+        if (n++ < 20) LOG("[taa] no motion variant: vs %llx cbufs %#x gmem store %d\n", st.program->stages[0].code_addr, pr->vi->cbuf_mask, pr->vi->uses_gmem_store);
+    }
     {   // mirror mode (runtime/hle/mirror.c): the scene's composite into the window image is drawn mirrored - the
         // unblended full-screen draw sampling an image the window's size (the window images also serve as scratch
         // targets earlier in the frame: those draws sample smaller images; the HUD after it blends)
@@ -2608,8 +2636,10 @@ static void draw(CmdRec *r, bool indexed) {
         }
         if (gpu_streams) gpu_streams = arena_streams(gpu_streams, stream_buf, stream_off);
     }
+    if (taa.on) taa_presented_draw(r, pr);   // (may close the pass: before begin_pass)
     begin_pass();
     arena_mark_encoded();
+    if (pr->vi->motion_written) taa_note_draw(pr);
 
     // pipeline
     uint64_t phash = pipeline_state_hash(pr);
@@ -2624,7 +2654,7 @@ static void draw(CmdRec *r, bool indexed) {
         if (!pobj) {
             pobj = build_pipeline(&rec, pr->vs, pr->fs) ?: (id)[NSNull null];
             @synchronized(cache) { cache[key] = pobj; }
-            pipe_record_add(&rec);
+            if (!pr->vi->motion_written && pass_mv_slot < 0) pipe_record_add(&rec);   // (not the temporal upscaler's variants)
         }
         if (pobj == [NSNull null]) { stat_skipped++; return; }
         pipe = pobj;
@@ -2700,7 +2730,9 @@ static void draw(CmdRec *r, bool indexed) {
 
     // resources
     bind_cbufs(0, pr->vi);
+    if (pr->vi->motion_written) taa_bind(pr, cbuf_base, fabsf(st.viewport[0][2] * vp_sx), fabsf(st.viewport[0][3] * vp_sy));
     bind_cbufs(1, pr->fi);
+    if (pr->fi->uses_lod_bias) taa_bind_fragment(pr);
     if (pr->vi->uses_gmem) [enc setVertexBuffer:arena_on() ? arena_buf_draw[0] : gpu_guest_buffer() offset:0 atIndex:GMEM_BUFFER_INDEX];
     static id<MTLBuffer> dbgvs;
     bool dbg_this = maxwell_dbg_vs && (const uint8_t *)(uintptr_t)st.program->stages[0].code_addr == maxwell_dbg_vs;
