@@ -265,6 +265,8 @@ void bdsp_app_init(int argc, char **argv) {
     const char *as = cfg_get(keys, vals, n, "aspect"), *rh = cfg_get(keys, vals, n, "render_height");
     if (as && *as) setenv("BDSP_ASPECT", as, 0);
     if (rh && *rh) setenv("BDSP_RENDER_H", rh, 0);
+    const char *up = cfg_get(keys, vals, n, "upscaler");
+    if (up && *up) setenv("BDSP_UPSCALER", up, 0);
     g_app.backups = cfg_int("BDSP_BACKUPS", cfg_get(keys, vals, n, "backups"), 10);
     bdsp_set_fps(cfg_int("BDSP_FPS", cfg_get(keys, vals, n, "fps"), 60));
     g_app.win_w = 1280;

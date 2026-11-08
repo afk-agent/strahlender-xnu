@@ -184,6 +184,26 @@
 		</dict>
 		<dict>
 			<key>Type</key>
+			<string>PSMultiValueSpecifier</string>
+			<key>Title</key>
+			<string>UPSCALER_TITLE</string>
+			<key>Key</key>
+			<string>bdsp_upscaler</string>
+			<key>DefaultValue</key>
+			<string>off</string>
+			<key>Titles</key>
+			<array>
+				<string>UPSCALER_OFF</string>
+				<string>UPSCALER_METALFX</string>
+			</array>
+			<key>Values</key>
+			<array>
+				<string>off</string>
+				<string>metalfx</string>
+			</array>
+		</dict>
+		<dict>
+			<key>Type</key>
 			<string>PSGroupSpecifier</string>
 			<key>Title</key>
 			<string>DEBUG_GROUP</string>

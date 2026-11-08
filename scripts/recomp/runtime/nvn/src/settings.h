@@ -1,4 +1,4 @@
-// Replacement for runtime/settings.h: fixed settings without MetalFX, SMAA and fullscreen.
+// Replacement for runtime/settings.h: the upscaler (MetalFX or off, BDSP_UPSCALER: nvn_glue.c settings_load); no SMAA, no fullscreen setting.
 #pragma once
 #include <stdbool.h>
 
