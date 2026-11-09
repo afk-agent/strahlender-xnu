@@ -1,7 +1,7 @@
 /* Settings.bundle, português (também para pt-BR e outras regiões) */
 "FPS_GROUP" = "Tela";
 "FPS_TITLE" = "Taxa de quadros";
-"FPS_FOOTER" = "Taxa de quadros da emulação. Vale após reiniciar o app. Padrão: 60 fps. 120 fps exige uma tela de 120 Hz.";
+"FPS_FOOTER" = "Taxa de quadros da emulação. Vale após reiniciar o app. Padrão: 60 fps. 120 fps exige uma tela de 120 Hz. Geração de quadros (iPadOS 26): o jogo roda com metade dos quadros e o MetalFX cria um a cada dois; menos calor, um pouco mais de atraso de entrada.";
 "FPS_30" = "30 fps";
 "FPS_60" = "60 fps";
 "FPS_120" = "120 fps";
@@ -20,7 +20,7 @@
 "NOTIFY_WARNINGS" = "Avisos de progresso e cópias";
 "NOTIFY_VERIFICATION" = "Estado da verificação completa";
 "ASPECT_GROUP" = "Imagem";
-"ASPECT_FOOTER" = "Proporção e resolução de renderização do jogo. O jogo desenha nativamente nesse formato, sem esticar e sem cortar a imagem. «Formato da tela» se ajusta exatamente a este aparelho; «Nativa» renderiza na altura em pixels da tela (mais pesado). Vale após reiniciar o app. Padrão: 16:9, 1080p. Upscaling: o MetalFX deixa a imagem mais nítida quando a altura de renderização é menor que a da tela (720p ou 1080p em um iPad). O MetalFX temporal combina vários quadros: mais nítido e suavizado (720p fica perto de 1080p), com mais carga na GPU.";
+"ASPECT_FOOTER" = "Proporção e resolução de renderização do jogo. O jogo desenha nativamente nesse formato, sem esticar e sem cortar a imagem. «Formato da tela» se ajusta exatamente a este aparelho; «Nativa» renderiza na altura em pixels da tela (mais pesado). Vale após reiniciar o app. Padrão: 16:9, 1080p. Upscaling: o MetalFX deixa a imagem mais nítida quando a altura de renderização é menor que a da tela (720p ou 1080p em um iPad). O MetalFX temporal combina vários quadros: mais nítido e suavizado (720p fica perto de 1080p), com mais carga na GPU. Saída temporal: um tamanho menor custa menos tempo de GPU.";
 "ASPECT_TITLE" = "Proporção";
 "ASPECT_169" = "16:9 (original)";
 "ASPECT_AUTO" = "Formato da tela";
@@ -37,3 +37,8 @@
 "UPSCALER_OFF" = "Desligado (bilinear)";
 "UPSCALER_METALFX" = "MetalFX espacial";
 "UPSCALER_TEMPORAL" = "MetalFX temporal";
+"FRAMEGEN_TITLE" = "Geração de quadros";
+"UPSCALE_MAX_TITLE" = "Saída temporal";
+"UPSCALE_MAX_FULL" = "Tamanho da tela";
+"UPSCALE_MAX_15" = "1,5 × tamanho de renderização";
+"UPSCALE_MAX_1" = "Tamanho de renderização (só suavização)";

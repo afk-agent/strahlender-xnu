@@ -75,3 +75,10 @@ static id<MTLTexture> metalfx_encode(id<MTLCommandBuffer> cb, id<MTLTexture> in,
     g_fx_last_frame = frame;
     return g_fx_out;
 }
+
+// The setting went off: the scaler and its output are released.
+static void metalfx_spatial_release(void) {
+    g_fx = nil; g_fx_out = nil;
+    g_fx_iw = g_fx_ih = g_fx_ow = g_fx_oh = 0;
+    g_fx_last = NULL;
+}

@@ -856,15 +856,28 @@ static void save_png(id<MTLTexture> tex, const char *path) { renderer_save_textu
 #define METALFX_LOG LOG
 #include "metalfx_scale.h"
 #include "metalfx_temporal.h"
+#include "metalfx_interp.h"
+// Frame generation (setting "framegen", metalfx_interp.h): on when set, supported, and the frame rate is 60 or 120 (the game then runs at
+// half of it: runtime/services_gfx.c reads g_bdsp_framegen_active for its vsync).
+extern volatile int g_bdsp_framegen_active;
+int metal_framegen_available(void) { return dev && metalfx_interp_supported(dev); }
+static bool framegen_update(void) {
+    bool on = __atomic_load_n(&g_settings.framegen, __ATOMIC_RELAXED) && g_bdsp_fps >= 60 && metal_framegen_available();
+    g_bdsp_framegen_active = on;
+    return on;
+}
+// The present pass: `src` into the drawable at (vx, vy, vw, vh) with the crop, then the host menu on top.
+static void encode_present_pass(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable, id<MTLTexture> src, double vx, double vy, double vw,
+                                double vh, const float crop[4]);
 // (the temporal setting falls back to the spatial scaler for a frame the temporal one cannot take)
 static id<MTLTexture> metalfx_upscale(id<MTLTexture> in, double ow_d, double oh_d) {
     int u = __atomic_load_n(&g_settings.upscaler, __ATOMIC_RELAXED);
     if (u != UPSCALE_METALFX && u != UPSCALE_METALFX_TEMPORAL) return nil;
     return metalfx_prepare(dev, in, ow_d, oh_d);
 }
-// The scene's target is upside down relative to the presented image: Unity draws render textures that way on this platform and its
-// final blit turns them (seen in BDSP_DEBUG_FRAME pass dumps: every scene target, against the presented image). BDSP_TAA_FLIP=0 if not.
-static bool taa_scene_flipped(void) { static int f = -1; if (f < 0) f = !getenv("BDSP_TAA_FLIP") || atoi(getenv("BDSP_TAA_FLIP")) != 0; return f; }
+// The scene's targets are upside down relative to the presented image (Unity's render textures; checked as the game runs:
+// tfx_orient_check in metalfx_temporal.h).
+static bool taa_scene_flipped(void) { return tfx_scene_flipped(); }
 // SMAA 1x (Video tab "Anti-aliasing"; third_party/smaa, MIT; as runtime/nvn/vulkan/shaders.c / exec.c): luma edges ->
 // blending weights -> neighbourhood blending, at the game image's size, before the present / MetalFX. The reference
 // SMAA.hlsl has no Metal mode: it is built through its SMAA_CUSTOM_SL porting macros, with a few textual fixes for
@@ -1275,6 +1288,14 @@ static bool present_gpu_locked(uint64_t frame, id<MTLTexture> tex, bool has_wc, 
     // without a drawable
     TaaFrame taa_frame = {0};
     if (!repeat) renderer_taa_frame(tex, tex ? (uint32_t)tex.width : 0, tex ? (uint32_t)tex.height : 0, &taa_frame);
+    bool fg_on = framegen_update() && !repeat;   // frame generation (metalfx_interp.h)
+    bool fg_second = false;                      // this frame's picture follows a generated one
+    if (!repeat) {   // effects switched off give their memory back (the temporal scaler: 100-200 MB at an iPad's size)
+        int u = __atomic_load_n(&g_settings.upscaler, __ATOMIC_RELAXED);
+        if (u != UPSCALE_METALFX_TEMPORAL && (g_tfx || (!fg_on && g_tfx_mv))) metalfx_temporal_release(!fg_on);
+        if (!fg_on && g_fi) metalfx_interp_release();
+        if (u == UPSCALE_OFF && g_fx) metalfx_spatial_release();
+    }
     @autoreleasepool {
         uint64_t nd0 = SDL_GetTicksNS();
         id<CAMetalDrawable> drawable = [layer nextDrawable];
@@ -1327,17 +1348,49 @@ static bool present_gpu_locked(uint64_t frame, id<MTLTexture> tex, bool has_wc, 
             bool temporal = __atomic_load_n(&g_settings.upscaler, __ATOMIC_RELAXED) == UPSCALE_METALFX_TEMPORAL;
             // SMAA (Video tab "Anti-aliasing"): first, at the game image's size (MetalFX then upscales its result)
             if (g_settings.antialias == AA_SMAA && !temporal) src = smaa_encode(cb, src);
+            // the scene's motion, depth and reactive mask in the presented image's orientation (temporal upscaling, frame generation)
+            bool inputs = false, motion = false;
+            if (!repeat && taa_frame.active) {
+                id<MTLTexture> copy = taa_frame.copy ? raw_view(taa_frame.copy) : nil;
+                inputs = tfx_prep_encode(dev, cb, src, copy, &taa_frame, taa_scene_flipped(), &motion);
+                if (inputs) tfx_orient_check(dev, cb, taa_frame.scene, copy ? copy : src, frame);   // (against the image before the HUD)
+            }
             // MetalFX temporal (setting "upscaler" = temporal, metalfx_temporal.h): the jittered frames with the scene's motion and
-            // depth give an image of the window's size (at least the image's own: anti-aliasing). A repeated present reuses it.
+            // depth give an image of the window's size (at least the image's own: anti-aliasing; at most "upscale_max" times it). A
+            // repeated present reuses it.
             id<MTLTexture> up = nil;
-            if (temporal && (repeat || taa_frame.active)) {
+            if (temporal && (repeat || inputs)) {
                 float scale = 1;
-                if (repeat) up = metalfx_temporal_encode(cb, src, nil, NULL, false, frame);
-                else if (metalfx_temporal_prepare(dev, src, vw / crop[2], vh / crop[3], &scale)) {
-                    id<MTLTexture> copy = taa_frame.copy ? raw_view(taa_frame.copy) : nil;
-                    up = metalfx_temporal_encode(cb, src, copy, &taa_frame, taa_scene_flipped(), frame);
-                }
+                if (repeat) up = metalfx_temporal_encode(cb, src, NULL, false, false, frame);
+                else if (metalfx_temporal_prepare(dev, src, vw / crop[2], vh / crop[3], __atomic_load_n(&g_settings.upscale_max, __ATOMIC_RELAXED) / 100.0f, &scale))
+                    up = metalfx_temporal_encode(cb, src, &taa_frame, motion, taa_scene_flipped(), frame);
                 if (!repeat) renderer_taa_status(up != nil, scale);   // (no jitter while the scaler cannot run)
+            }
+            // Frame generation (metalfx_interp.h): the picture between the previous frame and this one goes to this drawable now, this
+            // frame to a second drawable half a game frame later. It is made from the image the present pass would show before any
+            // spatial upscaling (the temporal output, else the game's image) and goes through the same spatial step.
+            if (fg_on && inputs) {
+                id<MTLTexture> base = up ? up : src;
+                float jy = taa_scene_flipped() ? -taa_frame.jitter_y : taa_frame.jitter_y;
+                id<MTLTexture> gen = metalfx_interp_encode(dev, cb, base, g_tfx_depth, g_tfx_mv_fg, taa_frame.jitter_x, jy, taa_frame.depth_reversed,
+                                                           (float)(2.0 / g_bdsp_fps), frame, !motion);
+                if (gen) {
+                    id<MTLTexture> show = gen;
+                    if (!up && metalfx_upscale(gen, vw / crop[2], vh / crop[3])) show = metalfx_encode(cb, gen, frame);
+                    encode_present_pass(cb, drawable, show, vx, vy, vw, vh, crop);
+                    [cb presentDrawable:drawable];
+                    [cb commit];
+                    g_present_cb = cb;
+                    static long fg_shot = -1;   // (test) BDSP_FG_SHOT=<frame>:<path>: save the generated picture before that frame
+                    static char fg_shot_path[512];
+                    if (fg_shot < 0) { const char *e = getenv("BDSP_FG_SHOT"); fg_shot = e ? atol(e) : 0; if (e && strchr(e, ':')) snprintf(fg_shot_path, sizeof fg_shot_path, "%s", strchr(e, ':') + 1); }
+                    if (fg_shot && (long)frame + 1 == fg_shot && fg_shot_path[0]) { [cb waitUntilCompleted]; renderer_save_texture(gen, fg_shot_path); }
+                    // (the spatial output is written again below for this frame: the next command buffer runs after this one)
+                    drawable = [layer nextDrawable];
+                    if (!drawable) return true;   // (the generated picture is on screen; this frame's own one is dropped)
+                    cb = [queue commandBuffer];
+                    fg_second = true;
+                }
             }
             // MetalFX spatial (setting "upscaler", metalfx_scale.h): when the game image is smaller than its place in the window, Apple's
             // spatial upscaler brings it to the window's size first (the whole image, so the interior crop below still applies); the
@@ -1408,7 +1461,8 @@ static bool present_gpu_locked(uint64_t frame, id<MTLTexture> tex, bool has_wc, 
             vper = 1.0 / (hz >= 30 && hz <= 240 ? hz : 120);
         }
         double tgt = 0;
-        if (pat == 1) [cb presentDrawable:drawable afterMinimumDuration:vper];
+        if (fg_second) [cb presentDrawable:drawable afterMinimumDuration:1.0 / g_bdsp_fps];   // (half a game frame after the generated one)
+        else if (pat == 1) [cb presentDrawable:drawable afterMinimumDuration:vper];
         else if (pat == 2) {
             // align to the vsync grid: target shortly before the next grid tick, so exactly that tick is hit
             double a = atomic_load(&vsync_anchor), now = CACurrentMediaTime();
@@ -1484,6 +1538,25 @@ static bool present_gpu_locked(uint64_t frame, id<MTLTexture> tex, bool has_wc, 
     return true;
 }
 
+static void encode_present_pass(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable, id<MTLTexture> src, double vx, double vy, double vw,
+                                double vh, const float crop[4]) {
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = drawable.texture;
+    rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+    rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+    float pv[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
+    [enc setViewport:(MTLViewport){vx, vy, vw, vh, 0, 1}];
+    [enc setRenderPipelineState:present_pipe];
+    [enc setVertexBytes:pv length:sizeof pv atIndex:0];
+    [enc setFragmentTexture:src atIndex:0];
+    [enc setFragmentSamplerState:present_sampler atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [enc endEncoding];
+    menu_render(dev, cb, drawable.texture);
+}
+
 void backend_present(NvnTexture *t) {
     extern bool renderer_worker_present(void (^job)(void));
     g_last_presented = t;
@@ -1553,6 +1626,12 @@ void backend_present(NvnTexture *t) {
         extern const char *game_level_name(void);
         if (last_fps_time > 0) LOG("[metal] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s)\n", now, (unsigned long long)total_frames,
                                    frames / (now - last_fps_time), max_gap * 1000.0, game_level_name(), renderer_stats());
+        {   // frame generation: pictures made per second (the game's own frames are the fps above)
+            static uint64_t gen_prev;
+            if (last_fps_time > 0 && g_fi_generated != gen_prev)
+                LOG("[framegen] %.1f generated pictures/s (game %.1f fps)\n", (g_fi_generated - gen_prev) / (now - last_fps_time), frames / (now - last_fps_time));
+            gen_prev = g_fi_generated;
+        }
         {   // (diagnostics) frame rate low for two periods in a row: what's allocated (at most once a minute)
             static int slow;
             static double last_dump = -100;

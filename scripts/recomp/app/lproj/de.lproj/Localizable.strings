@@ -56,3 +56,8 @@
 "MetalFX Spatial" = "MetalFX räumlich";
 "MetalFX Temporal" = "MetalFX temporal";
 "Off" = "Aus";
+"Temporal Output" = "Temporale Ausgabe";
+"Screen Size" = "Bildschirmgröße";
+"1.5 × Render Size" = "1,5 × Rendergröße";
+"Render Size (Anti-Aliasing Only)" = "Rendergröße (nur Kantenglättung)";
+"Frame Generation" = "Bildgenerierung";

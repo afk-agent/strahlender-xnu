@@ -4,6 +4,11 @@
 
 enum { UPSCALE_OFF, UPSCALE_METALFX, UPSCALE_FSR1, UPSCALE_METALFX_TEMPORAL };   // (the MetalFX values: Metal only, ignored here)
 enum { AA_OFF, AA_SMAA };
-typedef struct { int upscaler, antialias, res_mode; bool fullscreen; } BdspSettings;
+typedef struct {
+    int upscaler, antialias, res_mode;
+    bool fullscreen;
+    int upscale_max;     // (Metal only, ignored here)
+    int framegen;        // (Metal only, ignored here)
+} BdspSettings;
 extern BdspSettings g_settings;
 void settings_load(void);

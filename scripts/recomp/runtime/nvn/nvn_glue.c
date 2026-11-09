@@ -469,7 +469,20 @@ int bdsp_upscaler(void) {   // (the mode number: the backends' enums differ)
     int u = __atomic_load_n(&g_settings.upscaler, __ATOMIC_RELAXED);
     return u == UPSCALE_METALFX_TEMPORAL ? 2 : u == UPSCALE_METALFX ? 1 : 0;
 }
+// Largest output scale of the temporal upscaler: BDSP_UPSCALE_MAX=1.5 (output at most 1.5 times the render image, the present pass stretches
+// the rest; cheaper on small GPUs), 1 (anti-aliasing only), 0 or unset: the screen's size. Frame generation: BDSP_FRAMEGEN=on (1, yes, true):
+// the game runs at half the frame rate and MetalFX (macOS/iOS 26) makes the picture in between (nvn/src/nvn/metalfx_interp.h).
+void bdsp_set_upscale_max(float m) { __atomic_store_n(&g_settings.upscale_max, m >= 1.0f && m <= 4.0f ? (int)lroundf(m * 100) : 0, __ATOMIC_RELAXED); }
+float bdsp_upscale_max(void) { return __atomic_load_n(&g_settings.upscale_max, __ATOMIC_RELAXED) / 100.0f; }
+void bdsp_set_framegen(int on) { __atomic_store_n(&g_settings.framegen, on ? 1 : 0, __ATOMIC_RELAXED); }
+int bdsp_framegen(void) { return __atomic_load_n(&g_settings.framegen, __ATOMIC_RELAXED); }
+static void settings_load_extras(void) {
+    const char *m = getenv("BDSP_UPSCALE_MAX"), *f = getenv("BDSP_FRAMEGEN");
+    if (m) bdsp_set_upscale_max((float)atof(m));
+    if (f) bdsp_set_framegen(!strcasecmp(f, "on") || !strcasecmp(f, "1") || !strcasecmp(f, "yes") || !strcasecmp(f, "true"));
+}
 void settings_load(void) {
+    settings_load_extras();
     const char *u = getenv("BDSP_UPSCALER");
     static const char *const spatial[] = {"metalfx", "on", "1", "yes", "true"};
     static const char *const temporal[] = {"temporal", "metalfx-temporal", "metalfx_temporal", "2"};
@@ -496,13 +509,14 @@ void menu_render(void *dev, void *cb, void *target) { swkbd_overlay_render(dev, 
 // Frame rate limiter on g_bdsp_fps (30/60/120, services_gfx.c). Runs per presented frame (metal.m calls input_frame
 // after the present) and waits until the next target time. Game ticks only (waiting), no change to the renderer.
 extern volatile int g_bdsp_fps;
+extern volatile int g_bdsp_framegen_active;   // (frame generation: the game's frames come at half the rate, services_gfx.c)
 static void frame_pace(void) {
     static uint64_t next_ns;
     static uint64_t last_ns, report_ns;
     static unsigned hist[9], hist_n;
     static int hist_on = -1;
     if (hist_on < 0) hist_on = getenv("BDSP_FRAMEHIST") != NULL;
-    uint64_t period_ns = 1000000000ull / (unsigned)g_bdsp_fps;
+    uint64_t period_ns = 1000000000ull / (unsigned)g_bdsp_fps * (g_bdsp_framegen_active ? 2u : 1u);
     static int pace_pct = -1;   // BDSP_PACE_PCT: pacer shorter than the display (the presentation takes the rest)
     if (pace_pct < 0) pace_pct = getenv("BDSP_PACE_PCT") ? atoi(getenv("BDSP_PACE_PCT")) : 100;
     period_ns = period_ns * (unsigned)pace_pct / 100;

@@ -2253,6 +2253,11 @@ ShaderInfo *maxwell_translate_ex(const uint8_t *blob, size_t max_size, int stage
     if (key && key->motion > 0 && key->motion <= 8 && stage == STAGE_FRAGMENT && !((c->omap_target >> ((key->motion - 1) * 4)) & 0xF))
         mv_rt = key->motion - 1;
     info->motion_written = mv_vs || mv_rt >= 0;
+    uint32_t mv_prev = 0;    // vertex: attributes the second run reads from attribute 16 + i
+    if (mv_vs && key->motion_prev_attrs && !(info->cbuf_mask & (1u << MV_PREV_STREAM_INDEX)))
+        for (int i = 0; i < 16; i++)
+            if ((key->motion_prev_attrs >> i & 1) && (c->in_attr_mask >> i & 1) && key->attr_kind[i] == 0) mv_prev |= 1u << i;
+    info->motion_prev_attrs = (uint16_t)mv_prev;
     Str s = {0};
     // XNU: exact arithmetic. Metal's default (fast math, FMA contraction) changes results compared with the original
     // GPU, which rounds every FMUL and FADD separately; the pragmas are accepted by the Metal compiler of macOS 26 also
@@ -2282,6 +2287,8 @@ ShaderInfo *maxwell_translate_ex(const uint8_t *blob, size_t max_size, int stage
             int kind = key ? key->attr_kind[i] : 0;
             sp(&s, "  %s4 a%d [[attribute(%d)]];\n", kind == 1 ? "int" : kind == 2 ? "uint" : "float", i, i);
         }
+        for (int i = 0; i < 16; i++)   // XNU: previous-frame values (ShaderKey.motion_prev_attrs)
+            if (mv_prev >> i & 1) sp(&s, "  float4 p%d [[attribute(%d)]];\n", i, 16 + i);
         sp(&s, "};\n");
         sp(&s, "struct VOut {\n  float4 pos [[position, invariant]];\n");  // depth pre-pass + EQUAL test needs identical positions
         for (int i = 0; i < 32; i++)
@@ -2400,7 +2407,9 @@ ShaderInfo *maxwell_translate_ex(const uint8_t *blob, size_t max_size, int stage
         sp(&s, "vertex VOut main0(VIn in [[stage_in]], uint vid [[vertex_id]], uint iid [[instance_id]]%s%s, constant MvParams &mvp [[buffer(%d)]], constant uchar *mvprev [[buffer(%d)]]) {\n",
            args.buf ? args.buf : "", key->dbg_pos ? ", device float4 *dbgpos [[buffer(29)]]" : "", MV_PARAMS_BUFFER_INDEX, MV_PREV_BUFFER_INDEX);
         sp(&s, "  VOut out = vs_body(in, vid, iid%s);\n", hcall.buf ? hcall.buf : "");
-        sp(&s, "  float4 prev = vs_body(in, vid, iid%s).pos;\n", hcallp.buf ? hcallp.buf : "");
+        sp(&s, "  VIn pin = in;\n");
+        for (int i = 0; i < 16; i++) if (mv_prev >> i & 1) sp(&s, "  pin.a%d = in.p%d;\n", i, i);
+        sp(&s, "  float4 prev = vs_body(pin, vid, iid%s).pos;\n", hcallp.buf ? hcallp.buf : "");
         if (key->flip_y) sp(&s, "  out.pos.y = -out.pos.y; prev.y = -prev.y;\n");
         if (key->flip_x) sp(&s, "  out.pos.x = -out.pos.x; prev.x = -prev.x;\n");
         if (key->depth_minus_one) sp(&s, "  out.pos.z = (out.pos.z + out.pos.w) * 0.5f;\n");

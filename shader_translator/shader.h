@@ -60,11 +60,15 @@ typedef struct {
     // XNU: MetalFX temporal upscaler, fragment: samples with an implicit level of detail get an extra bias, MvParams-free float4 at
     // MV_PARAMS_BUFFER_INDEX (.x): the jittered scene is drawn below the output resolution and textures keep the output's detail.
     uint8_t lod_bias;
+    // XNU: MetalFX temporal upscaler, vertex (with motion): generic attributes (bit i) whose previous-frame values come from vertex
+    // attribute 16 + i (the GPU-skinned positions of the previous frame, bound at MV_PREV_STREAM_INDEX); the second run reads those.
+    uint16_t motion_prev_attrs;
 } ShaderKey;
 
 // XNU: MetalFX temporal upscaler, vertex stage (ShaderKey.motion): per-draw parameters and the previous frame's constant buffers
 #define MV_PARAMS_BUFFER_INDEX 15
 #define MV_PREV_BUFFER_INDEX 16
+#define MV_PREV_STREAM_INDEX 13   // vertex buffer of the previous-frame attributes (ShaderKey.motion_prev_attrs)
 typedef struct { float jitter[4]; uint32_t off[16]; } MvParams;   // off[k]: byte offset of cbuf k in the previous-frame buffer
 
 typedef struct {
@@ -109,6 +113,7 @@ typedef struct {
     uint32_t local_mem;     // bytes of local memory
     uint32_t num_insts;
     bool uses_lod_bias;     // XNU: ShaderKey.lod_bias applied (bind the bias at MV_PARAMS_BUFFER_INDEX of the fragment stage)
+    uint16_t motion_prev_attrs;  // XNU: the ShaderKey.motion_prev_attrs that were emitted (read by the shader, float, cbuf 13 free)
     bool motion_written;    // XNU: the ShaderKey.motion variant was emitted (vertex: not with global memory stores or a cbuf in
                             // slots 15/16; fragment: not when the shader itself writes colour k)
     char error[256];        // set when translation fails

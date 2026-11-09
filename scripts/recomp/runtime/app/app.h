@@ -49,3 +49,7 @@ extern volatile int g_bdsp_fps;      // services_gfx.c: frame rate 30/60/120
 void bdsp_set_fps(int fps);          // invalid values are ignored
 void bdsp_set_upscaler(int mode);   // nvn_glue.c: upscaler of the presented image, 0 off, 1 MetalFX spatial, 2 MetalFX temporal; at once
 int bdsp_upscaler(void);
+void bdsp_set_upscale_max(float m);  // nvn_glue.c: largest temporal output scale (0 = the screen's size), effective at once
+float bdsp_upscale_max(void);
+void bdsp_set_framegen(int on);      // nvn_glue.c: frame generation on/off, effective at once
+int bdsp_framegen(void);

@@ -18,6 +18,7 @@ static char text[64];
 uint64_t g_proc_start_ns;
 #ifndef QT_INPUT_PROBE
 volatile int g_bdsp_fps = 60;
+volatile int g_bdsp_framegen_active;
 #endif
 
 void input_handle_event(const void *event);

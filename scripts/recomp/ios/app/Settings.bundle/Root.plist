@@ -124,6 +124,16 @@
 		</dict>
 		<dict>
 			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>FRAMEGEN_TITLE</string>
+			<key>Key</key>
+			<string>bdsp_framegen</string>
+			<key>DefaultValue</key>
+			<false/>
+		</dict>
+		<dict>
+			<key>Type</key>
 			<string>PSGroupSpecifier</string>
 			<key>Title</key>
 			<string>ASPECT_GROUP</string>
@@ -202,6 +212,28 @@
 				<string>off</string>
 				<string>metalfx</string>
 				<string>temporal</string>
+			</array>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSMultiValueSpecifier</string>
+			<key>Title</key>
+			<string>UPSCALE_MAX_TITLE</string>
+			<key>Key</key>
+			<string>bdsp_upscale_max</string>
+			<key>DefaultValue</key>
+			<string>0</string>
+			<key>Titles</key>
+			<array>
+				<string>UPSCALE_MAX_FULL</string>
+				<string>UPSCALE_MAX_15</string>
+				<string>UPSCALE_MAX_1</string>
+			</array>
+			<key>Values</key>
+			<array>
+				<string>0</string>
+				<string>1.5</string>
+				<string>1</string>
 			</array>
 		</dict>
 		<dict>

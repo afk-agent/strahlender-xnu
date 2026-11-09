@@ -12,8 +12,10 @@
 //    size also writes previous - current (uv units) into an extra colour attachment. The previous contents are copies taken when a
 //    jittered draw used them, per guest address and per version within the frame (an address rewritten between draws has several
 //    versions, matched in order), so a camera buffer every draw shares is copied once per frame.
-//    Not covered: vertex positions the GPU skins anew every frame (characters) move only with their object matrix; MetalFX's own
-//    history check limits what that leaves behind.
+//    Vertex positions the GPU skins anew every frame (characters): a compute range that jittered draws read as a vertex stream is
+//    learned, and before the next frame's dispatch overwrites it, it is copied (the previous frame's skinned vertices); the second
+//    run of the vertex shader reads its attributes from that copy (ShaderKey.motion_prev_attrs). Not with the arena (devices below
+//    5 GB, where compute writes go through copies): there they move only with their object matrix.
 //  - pixels without usable history: the HUD, text and menus are drawn over the scene's composite into the presented image. The image
 //    is copied before the first such draw; at the present, pixels that differ from the copy are "reactive" (MetalFX follows the
 //    current frame there).
@@ -32,7 +34,8 @@ typedef struct {
 static TaaArena *taa_cur, *taa_prev;
 
 static struct {
-    bool on;                 // this frame is jittered and records motion
+    bool on;                 // this frame records motion (temporal upscaling or frame generation)
+    bool jitter;             // ... and is jittered (temporal upscaling)
     bool broken;             // the present could not run the scaler: no jitter until the setting changes
     uint64_t frame;          // frame number of the state below (counts presents)
     uint32_t w, h;           // guest size of the presented image; targets of that size get jitter and motion
@@ -44,7 +47,8 @@ static struct {
     uint64_t mv_frame, mv_ms_frame;   // frame the motion texture / its multisampled attachment was last cleared in
     bool mv_written;
     id<MTLTexture> depth;    // the scene's depth: the depth target of the pass the motion was written in
-    id<MTLTexture> pass_depth;
+    id<MTLTexture> pass_depth, pass_color;
+    id<MTLTexture> scene;    // the colour target of the passes with motion (metal.m checks the scene's orientation against the image)
     float depth_clear;       // value the game clears it to (0: reversed depth)
     NvnTexture *wants[8];    // colour targets that had opaque jittered draws (their passes get the motion attachment)
     uint64_t wants_frame[8];
@@ -55,7 +59,12 @@ static struct {
     __strong id<MTLCommandBuffer> prev_cb[4];
     int prev_i;
     uint64_t prev_frame;
-    uint64_t draws, mv_draws, hits, misses;   // (stats)
+    uint64_t draws, mv_draws, hits, misses, skin_copies, skin_bytes, skin_draws;   // (stats)
+    uint32_t off_frames;     // frames since the effects went off (their textures and copies are released after a second)
+    struct { uint64_t addr, size, seen, snap; id<MTLBuffer> prev; } skin[32];   // compute ranges read as vertex streams; their copies
+    int draw_skin;           // (taa_keys -> draw) skin entry of the draw's previous-frame attributes, -1: none
+    int draw_skin_stream;    // the vertex stream they replace
+    uint64_t draw_skin_off;  // offset of the draw's stream in that copy
 } taa;
 // (pass_mv_slot, renderer.m: colour attachment of the motion in the open pass, -1: none)
 static bool pass_taa;           // the open pass's depth target has the presented image's size
@@ -118,15 +127,26 @@ static void taa_next_frame(void) {
     taa.copy_src = nil;
     taa.mv_written = false;
     taa.depth = nil;
+    taa.scene = nil;
     bool want = __atomic_load_n(&g_settings.upscaler, __ATOMIC_RELAXED) == UPSCALE_METALFX_TEMPORAL;
+    extern volatile int g_bdsp_framegen_active;   // (metal.m: frame generation needs the motion and depth too, not the jitter)
     if (!want) taa.broken = false;   // (switching the setting off and on tries again)
-    taa.on = want && !taa.broken && taa.w && taa.h;
+    taa.jitter = want && !taa.broken && taa.w && taa.h;
+    taa.on = (taa.jitter || g_bdsp_framegen_active) && taa.w && taa.h;
+    if (taa.on) taa.off_frames = 0;
+    else if (++taa.off_frames == 60 && (taa.mv || taa.copy || taa_cur->cap)) {   // (the motion textures, the pre-HUD copy, the arenas)
+        taa.mv = taa.mv_ms = taa.copy = nil;
+        for (int i = 0; i < 4; i++) { taa.prev_buf[i] = nil; taa.prev_cb[i] = nil; }
+        for (TaaArena *a = taa_cur; a; a = a == taa_cur ? taa_prev : NULL) { free(a->data); a->data = NULL; a->cap = 0; taa_arena_reset(a); }
+        memset(taa.wants, 0, sizeof taa.wants);
+        LOG("[taa] off: motion textures and buffer copies released\n");
+    }
     // MetalFX's guidance: at least 8 phases per input pixel, times the square of the scale
     uint32_t n = (uint32_t)ceilf(8.0f * fmaxf(1.0f, taa.out_scale * taa.out_scale));
     taa.nphase = n > 64 ? 64 : n;
     taa.phase = (taa.phase + 1) % taa.nphase;
-    taa.dx = taa.on ? (float)(taa_halton(taa.phase, 2) - 0.5) : 0;
-    taa.dy = taa.on ? (float)(taa_halton(taa.phase, 3) - 0.5) : 0;
+    taa.dx = taa.jitter ? (float)(taa_halton(taa.phase, 2) - 0.5) : 0;
+    taa.dy = taa.jitter ? (float)(taa_halton(taa.phase, 3) - 0.5) : 0;
 }
 
 // The depth target of the current state has the presented image's size (jitter and motion apply)
@@ -140,9 +160,10 @@ static bool taa_depth_target(void) {
 static void taa_begin_pass(MTLRenderPassDescriptor *rp) {
     pass_mv_slot = -1;
     pass_taa = taa_depth_target();
-    taa.pass_depth = nil;
+    taa.pass_depth = taa.pass_color = nil;
     if (!pass_taa) return;
     taa.pass_depth = rp.depthAttachment.texture;
+    taa.pass_color = rp.colorAttachments[0].texture;
     NvnTexture *c = st.rt.ncolor ? st.rt.color[0] : NULL;
     if (!c || st.rt.ncolor >= 8 || c->width != taa.w || c->height != taa.h || c->samples != st.rt.depth->samples ||
         renderer_texture_presented(c)) return;
@@ -197,14 +218,16 @@ static void taa_note_clear(bool depth, float dval) {
 
 // Shader variant of a draw (chosen before begin_pass): jitter and the previous position when it tests depth against a target of the
 // presented size; the motion output when it does not blend and its pass will have the motion attachment.
+static uint16_t taa_skin_attrs(const ShaderKey *vkey);
 static void taa_keys(ShaderKey *vkey, ShaderKey *fkey) {
     if (!taa_depth_target() || !st.ds[0] || st.ds[2] == 8 /* always */ || vkey->flip_x) return;
     // (not into the presented image: what is drawn there after the composite is reactive, so MetalFX shows it as drawn - jittered)
     if (st.rt.ncolor && st.rt.color[0] && renderer_texture_presented(st.rt.color[0])) return;
     vkey->motion = 1;
+    vkey->motion_prev_attrs = taa_skin_attrs(vkey);   // (GPU-skinned vertices: the previous frame's copy)
     static int bias = -1;   // BDSP_TAA_LOD_BIAS=0: textures keep the level of detail of the render resolution
     if (bias < 0) bias = !getenv("BDSP_TAA_LOD_BIAS") || atoi(getenv("BDSP_TAA_LOD_BIAS")) != 0;
-    fkey->lod_bias = bias && taa.out_scale > 1.01f;
+    fkey->lod_bias = bias && taa.jitter && taa.out_scale > 1.01f;
     if (st.color_state[0] & 1) return;
     int slot = pass_mv_slot;
     if (!enc || st.rt_dirty) {   // the pass opens with this draw: it gets the attachment as taa_begin_pass decides
@@ -241,7 +264,80 @@ static void taa_note_draw(Prog *pr) {
         taa.mv_written = true;
         taa.mv_draws++;
         taa.depth = taa.pass_depth;
+        taa.scene = taa.pass_color;
     }
+}
+
+// ---- GPU-skinned vertices: the previous frame's copy of a compute range read as a vertex stream
+static bool taa_skin_possible(void) {   // (BDSP_TAA_SKIN=0: no copies, skinned characters move with their object matrix only)
+    static int on = -1;
+    if (on < 0) on = !getenv("BDSP_TAA_SKIN") || atoi(getenv("BDSP_TAA_SKIN")) != 0;
+    return on && taa.on && !arena_on();
+}
+
+// (draw) a jittered draw reads stream [a, a + size): a compute range it lies in is remembered for copying
+static void taa_skin_learn(uint64_t a, uint64_t size) {
+    for (int k = 0; k < hz_n; k++) {
+        if (a < hz_ranges[k].addr || a + size > hz_ranges[k].addr + hz_ranges[k].size) continue;
+        int i, free_i = -1;
+        for (i = 0; i < 32; i++) {
+            if (taa.skin[i].addr == hz_ranges[k].addr && taa.skin[i].size == hz_ranges[k].size) break;
+            if (free_i < 0 && (!taa.skin[i].addr || taa.skin[i].seen + 60 < taa.frame)) free_i = i;
+        }
+        if (i == 32) {
+            if (free_i < 0) return;
+            i = free_i;
+            taa.skin[i].addr = hz_ranges[k].addr; taa.skin[i].size = hz_ranges[k].size; taa.skin[i].snap = 0; taa.skin[i].prev = nil;
+        }
+        taa.skin[i].seen = taa.frame;
+        return;
+    }
+}
+
+// (dispatch_compute, before the dispatch is encoded) a learned range this dispatch writes is copied first: the copy holds what the
+// previous frame's dispatch wrote. (A range written twice in a frame gets the first write as its "previous" one: no own motion.)
+static void taa_skin_before_dispatch(void) {
+    if (!taa_skin_possible()) return;
+    id<MTLBlitCommandEncoder> bl = nil;
+    for (int r = 0; r < 16; r++) {
+        uint64_t a = st.sbuf[5][r].addr, size = st.sbuf[5][r].size;
+        if (!a || !size || a < HEAP_BASE || a + size > HEAP_BASE + HEAP_MAX || (a & 3) || (size & 3)) continue;
+        for (int i = 0; i < 32; i++) {
+            if (taa.skin[i].addr != a || taa.skin[i].size != size || taa.skin[i].seen + 4 < taa.frame || taa.skin[i].snap == taa.frame) continue;
+            if (!taa.skin[i].prev || taa.skin[i].prev.length < size)
+                taa.skin[i].prev = [dev newBufferWithLength:size options:MTLResourceStorageModePrivate];
+            if (!bl) bl = [cb() blitCommandEncoder];
+            [bl copyFromBuffer:gpu_guest_buffer() sourceOffset:a - HEAP_BASE toBuffer:taa.skin[i].prev destinationOffset:0 size:size];
+            taa.skin[i].snap = taa.frame;
+            taa.skin_copies++; taa.skin_bytes += size;
+        }
+    }
+    if (bl) [bl endEncoding];
+}
+
+// (taa_keys) the attributes of the draw that come from a stream with a copy made this frame: they read the copy in the second run
+static uint16_t taa_skin_attrs(const ShaderKey *vkey) {
+    taa.draw_skin = -1;
+    if (!taa_skin_possible()) return 0;
+    for (int i = 0; i < st.nattrib && i < 16; i++) {
+        uint32_t a = st.attrib[i], s = (a >> 8) & 0x1F;
+        if (!(a & 0xFF) || s >= 12 || !st.vbuf[s].addr || s >= (uint32_t)st.nstream || !st.stream[s][0] || st.stream[s][1]) continue;
+        uint64_t va = st.vbuf[s].addr, vs = st.vbuf[s].size ? st.vbuf[s].size : 16;
+        taa_skin_learn(va, vs);
+        for (int k = 0; k < 32 && taa.draw_skin < 0; k++)
+            if (taa.skin[k].snap == taa.frame && taa.skin[k].prev && va >= taa.skin[k].addr && va + vs <= taa.skin[k].addr + taa.skin[k].size &&
+                !((va - taa.skin[k].addr) & 3)) {
+                taa.draw_skin = k;
+                taa.draw_skin_off = va - taa.skin[k].addr;
+                taa.draw_skin_stream = (int)s;
+            }
+    }
+    if (taa.draw_skin < 0) return 0;
+    taa.skin_draws++;
+    uint16_t m = 0;
+    for (int i = 0; i < st.nattrib && i < 16; i++)
+        if ((st.attrib[i] & 0xFF) && (int)((st.attrib[i] >> 8) & 0x1F) == taa.draw_skin_stream && vkey->attr_kind[i] == 0) m |= 1u << i;
+    return m;
 }
 
 // The previous frame's copies on the GPU, uploaded once per frame (a pool of buffers, one per frame in flight)
@@ -327,6 +423,7 @@ void renderer_taa_frame(id<MTLTexture> tex, uint32_t gw, uint32_t gh, TaaFrame *
         out->active = true;
         out->motion = taa.mv_written ? taa.mv : nil;
         out->depth = taa.mv_written ? taa.depth : nil;
+        out->scene = taa.mv_written ? taa.scene : nil;
         id<MTLTexture> base = tex.parentTexture ? tex.parentTexture : tex;
         id<MTLTexture> cs = taa.copy_src.parentTexture ? taa.copy_src.parentTexture : taa.copy_src;
         out->copy = taa.copy_src && cs == base ? taa.copy : nil;
@@ -336,9 +433,11 @@ void renderer_taa_frame(id<MTLTexture> tex, uint32_t gw, uint32_t gh, TaaFrame *
         static int nlog;
         if (getenv("BDSP_TAA_LOG") && nlog++ % 120 == 0)
             LOG("[taa] frame %llu %ux%u jitter %.3f %.3f (%u/%u) | since start: jittered draws %llu, with motion output %llu, constant buffers "
-                "with a previous version %llu, without %llu | this frame: motion %d depth %d pre-HUD copy %d, copies %u KB\n",
+                "with a previous version %llu, without %llu, skinned draws %llu (copies %llu, %llu KB) | this frame: motion %d depth %d "
+                "pre-HUD copy %d, copies %u KB\n",
                 (unsigned long long)taa.frame, taa.w, taa.h, taa.dx, taa.dy, taa.phase, taa.nphase, (unsigned long long)taa.draws,
-                (unsigned long long)taa.mv_draws, (unsigned long long)taa.hits, (unsigned long long)taa.misses, out->motion != nil,
+                (unsigned long long)taa.mv_draws, (unsigned long long)taa.hits, (unsigned long long)taa.misses, (unsigned long long)taa.skin_draws,
+                (unsigned long long)taa.skin_copies, (unsigned long long)(taa.skin_bytes >> 10), out->motion != nil,
                 out->depth != nil, out->copy != nil, taa_cur ? taa_cur->len >> 10 : 0);
     }
     taa.w = gw; taa.h = gh;

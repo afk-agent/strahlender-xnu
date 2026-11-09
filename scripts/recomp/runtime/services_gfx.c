@@ -19,6 +19,8 @@ static uint32_t new_event_handle(KEvent **out) {
 static KEvent *g_vsync;
 volatile int g_bdsp_paused;   // set by the app shell (pause, focus loss): the vsync event stays off, the game waits
 volatile int g_bdsp_fps = 60; // frame rate: 30, 60 or 120 (app setting, see bdsp_set_fps)
+volatile int g_bdsp_framegen_active;   // frame generation runs (the Metal backend sets it): the game gets half the frame rate, the
+                                       // pictures in between are generated (nvn/src/nvn/metalfx_interp.h)
 void bdsp_set_fps(int fps) {
     if (fps == 30 || fps == 60 || fps == 120) g_bdsp_fps = fps;
 }
@@ -30,7 +32,7 @@ static void *vsync_thread(void *arg) {
     static int vlog = -1;
     if (vlog < 0) vlog = getenv("BDSP_VSYNC_LOG") != NULL;
     for (;;) {
-        uint64_t period = 1000000000ull / (uint64_t)g_bdsp_fps;
+        uint64_t period = 1000000000ull / (uint64_t)g_bdsp_fps * (g_bdsp_framegen_active ? 2u : 1u);
         next += period;
         uint64_t now = plat_now_ns();
         if (next > now) {

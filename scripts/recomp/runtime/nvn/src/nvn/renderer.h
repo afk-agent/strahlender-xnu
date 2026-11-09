@@ -12,6 +12,7 @@ extern uint64_t g_guest_buffer_base;
 // MetalFX temporal upscaler (taa.inc): what the present needs to scale the frame's presented image
 typedef struct {
     bool active;                 // the frame was jittered
+    __unsafe_unretained id<MTLTexture> scene;                 // the colour target the motion was written with (orientation check)
     __unsafe_unretained id<MTLTexture> motion, depth, copy;   // scene motion and depth (nil: none this frame); the presented
                                                               // image before the HUD (nil: nothing drawn over the scene)
     float jitter_x, jitter_y;    // content shift in pixels, y down in the scene's target
