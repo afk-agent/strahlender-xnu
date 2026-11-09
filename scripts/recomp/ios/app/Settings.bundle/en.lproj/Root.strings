@@ -1,7 +1,7 @@
 /* Settings.bundle, English (fallback) */
 "FPS_GROUP" = "Display";
 "FPS_TITLE" = "Frame rate";
-"FPS_FOOTER" = "Frame rate of the emulation. Takes effect after restarting the app. Default: 60 fps. 120 fps requires a 120 Hz display.";
+"FPS_FOOTER" = "Frame rate of the emulation. Takes effect after restarting the app. Default: 60 fps. 120 fps requires a 120 Hz display. Frame generation (iPadOS 26): the game runs at half the frame rate and MetalFX makes every other picture; less heat, a little more input delay.";
 "FPS_30" = "30 fps";
 "FPS_60" = "60 fps";
 "FPS_120" = "120 fps";
@@ -20,7 +20,7 @@
 "NOTIFY_WARNINGS" = "Save and backup warnings";
 "NOTIFY_VERIFICATION" = "Full verification status";
 "ASPECT_GROUP" = "Picture";
-"ASPECT_FOOTER" = "Aspect ratio and render resolution of the game. The game draws natively at this shape with no stretching and no cropped area. \"Screen shape\" fits this device exactly; \"Native\" renders at the screen's own pixel height (heavier). Takes effect after restarting the app. Default: 16:9, 1080p. Upscaler: MetalFX Spatial sharpens the picture (cheap) when the render height is below the screen's (720p or 1080p on an iPad). MetalFX Temporal combines several frames: sharper and anti-aliased (720p comes close to 1080p), at a higher GPU cost.";
+"ASPECT_FOOTER" = "Aspect ratio and render resolution of the game. The game draws natively at this shape with no stretching and no cropped area. \"Screen shape\" fits this device exactly; \"Native\" renders at the screen's own pixel height (heavier). Takes effect after restarting the app. Default: 16:9, 1080p. Upscaler: MetalFX Spatial sharpens the picture (cheap) when the render height is below the screen's (720p or 1080p on an iPad). MetalFX Temporal combines several frames: sharper and anti-aliased (720p comes close to 1080p), at a higher GPU cost. Temporal output: a smaller size costs less GPU time.";
 "ASPECT_TITLE" = "Aspect ratio";
 "ASPECT_169" = "16:9 (original)";
 "ASPECT_AUTO" = "Screen shape";
@@ -37,3 +37,8 @@
 "UPSCALER_OFF" = "Off (bilinear)";
 "UPSCALER_METALFX" = "MetalFX Spatial";
 "UPSCALER_TEMPORAL" = "MetalFX Temporal";
+"FRAMEGEN_TITLE" = "Frame generation";
+"UPSCALE_MAX_TITLE" = "Temporal output";
+"UPSCALE_MAX_FULL" = "Screen size";
+"UPSCALE_MAX_15" = "1.5 × render size";
+"UPSCALE_MAX_1" = "Render size (anti-aliasing only)";

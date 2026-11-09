@@ -513,6 +513,7 @@ static int pass_mv_slot = -1;
 static void taa_begin_pass(MTLRenderPassDescriptor *rp);
 static void taa_attachment_format(MTLRenderPipelineDescriptor *pd);
 static void taa_note_clear(bool depth, float dval);
+static void taa_skin_before_dispatch(void);
 
 // ------------------------------------------------------------------ render passes
 static __unsafe_unretained id last_bias_enc;  // encoder the depth bias was last set on
@@ -1390,7 +1391,7 @@ static void compile_program_impl(Prog *pr) {
     __atomic_fetch_add(&stat_compiles, 1, __ATOMIC_RELAXED);
     double dt = now_ms() - t0;
     @synchronized(cache) { stat_compile_ms += dt; }
-    pr->ready = true;
+    __atomic_store_n(&pr->ready, true, __ATOMIC_RELEASE);   // (taa.inc variants compile on another thread: the draw thread reads it acquiring)
 }
 
 extern void bdsp_shader_compile_status(int active) __attribute__((weak_import));
@@ -1476,10 +1477,23 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
     shader_cache_note(pr->vi->msl, pr->fi->msl);
     pr->vh = fnv64(pr->vi->msl);
     pr->fh = fnv64(pr->fi->msl);
-    compile_program(pr);
     // The sources are not needed after the libraries exist (~350 MB for the shaders of a session); keep them with BDSP_KEEP_MSL=1
     static int keep_msl = -1;
     if (keep_msl < 0) keep_msl = getenv("BDSP_KEEP_MSL") != NULL;
+    if (vkey->motion || fkey->motion || fkey->lod_bias) {
+        // the temporal upscaler's variants (taa.inc) compile in the background, one at a time: the draw uses the game's own program until
+        // the variant is ready (no first-use stall in a new area; the draw is not jittered for those frames)
+        static dispatch_queue_t q;
+        static dispatch_once_t qonce;
+        dispatch_once(&qonce, ^{ q = dispatch_queue_create("bdsp.taa.compile", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)); });
+        Prog *bg = pr;
+        dispatch_async(q, ^{
+            compile_program_impl(bg);
+            if (!keep_msl) { free(bg->vi->msl); bg->vi->msl = NULL; free(bg->fi->msl); bg->fi->msl = NULL; }
+        });
+        return pr;
+    }
+    compile_program(pr);
     if (!keep_msl) { free(pr->vi->msl); pr->vi->msl = NULL; free(pr->fi->msl); pr->fi->msl = NULL; }
     return pr->failed ? nil : pr;
 }
@@ -1977,6 +1991,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     }
     CST("end_pass");
     end_pass();
+    taa_skin_before_dispatch();   // (taa.inc: the previous frame's skinned vertices, before this dispatch overwrites them)
     CST("encoder");
     id<MTLComputeCommandEncoder> ce = pt_compute_encoder("compute");
     arena_mark_encoded();
@@ -2293,6 +2308,13 @@ static void rec_from_state(const Prog *pr, uint32_t used_streams, PipeRec *r) {
         }
         r->attr[i] = (typeof(r->attr[0])){1, vertex_format(fmt), off, 18 + stream};
     }
+    for (int i = 0; i < 16; i++) {   // (taa.inc) previous-frame values of the skinned attributes: attribute 16 + i, same layout
+        if (!(pr->vi->motion_prev_attrs >> i & 1) || i >= st.nattrib) continue;
+        uint32_t a = st.attrib[i], s = (a >> 8) & 0x1F;
+        r->attr[16 + i] = (typeof(r->attr[0])){1, vertex_format(a & 0xFF), a >> 13, MV_PREV_STREAM_INDEX};
+        uint32_t stride = s < (uint32_t)st.nstream ? st.stream[s][0] : 0;
+        r->lay[MV_PREV_STREAM_INDEX] = (typeof(r->lay[0])){1, (stride + 3) & ~3u, MTLVertexStepFunctionPerVertex, 1};
+    }
     for (int s = 0; s < 12; s++) {
         if (!(used_streams & (1u << s))) continue;
         uint32_t stride = s < st.nstream ? st.stream[s][0] : 0, div = s < st.nstream ? st.stream[s][1] : 0;
@@ -2524,6 +2546,10 @@ static void draw(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     if (taa.on) taa_keys(&vkey, &fkey);  // taa.inc: jitter / motion variants
     Prog *pr = get_program(st.program, &vkey, &fkey);
+    if ((!pr || !__atomic_load_n(&pr->ready, __ATOMIC_ACQUIRE)) && (vkey.motion || fkey.motion || fkey.lod_bias)) {
+        vkey.motion = fkey.motion = fkey.lod_bias = 0;   // (the variant is compiling or failed: the game's own program)
+        pr = get_program(st.program, &vkey, &fkey);
+    }
     if (!pr || !pr->ready) { stat_skipped++; return; }
     if (vkey.motion && !pr->vi->motion_written && getenv("BDSP_TAA_LOG")) {   // (taa.inc: a vertex shader without the jitter variant)
         static int n;
@@ -2898,6 +2924,8 @@ static void draw(CmdRec *r, bool indexed) {
         else { static const float zero[4]; [enc setVertexBytes:zero length:16 atIndex:18 + s]; }
     }
     if (used_streams & (1u << 31)) { static const float zero[4] = {0, 0, 0, 1}; [enc setVertexBytes:zero length:16 atIndex:30]; }
+    if (pr->vi->motion_prev_attrs && taa.draw_skin >= 0)   // (taa.inc: the previous frame's skinned vertices)
+        [enc setVertexBuffer:taa.skin[taa.draw_skin].prev offset:taa.draw_skin_off atIndex:MV_PREV_STREAM_INDEX];
 
     // Instanced draws with item spots among their instances (bushsanity: bushes are drawn in batches, each instance's
     // model matrix in vertex storage buffer 0, indexed by instance id): drawn as runs of instances, gold runs tinted.

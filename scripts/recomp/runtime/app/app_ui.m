@@ -246,6 +246,8 @@ static const char *const k_default_config =
     "# render_height = 1080      # render image height in pixels, or auto = the window's native pixel height\n"
     "# upscaler = off            # metalfx: Apple's MetalFX upscaler when the window is larger than the render image; temporal: MetalFX temporal\n"
     "#                            # upscaling and anti-aliasing (also at the image's own size) (the menu View > Upscaler takes precedence)\n"
+    "# upscale_max = 0            # temporal output at most this times the render size (1.5: cheaper; 1: anti-aliasing only; 0: screen size)\n"
+    "# framegen = off             # on: the game runs at half the frame rate, MetalFX makes the picture in between (macOS 26)\n"
     "# fps = 60                  # frame rate: 30, 60 or 120 (the menu View > Frame Rate takes precedence)\n";
 
 #define KEYS_HELP_EN \
@@ -277,6 +279,9 @@ void bdsp_app_apply_display_defaults(void) {
     if (h.length && !getenv("BDSP_RENDER_H")) setenv("BDSP_RENDER_H", h.UTF8String, 0);
     NSString *u = [d stringForKey:@"bdsp_upscaler"];
     if (u.length) setenv("BDSP_UPSCALER", u.UTF8String, 0);
+    NSString *m = [d stringForKey:@"bdsp_upscale_max"], *f = [d stringForKey:@"bdsp_framegen"];
+    if (m.length) setenv("BDSP_UPSCALE_MAX", m.UTF8String, 0);
+    if (f.length) setenv("BDSP_FRAMEGEN", f.UTF8String, 0);
 }
 
 @implementation BdspMenu
@@ -323,6 +328,20 @@ void bdsp_app_apply_display_defaults(void) {
     bdsp_set_upscaler((int)s.tag);
     [[NSUserDefaults standardUserDefaults] setObject:@(n) forKey:@"bdsp_upscaler"];
     setenv("BDSP_UPSCALER", n, 1);   // (a restart by exec keeps the environment: the old value must not win there)
+}
+// View > Upscaler > Temporal Output: tag = scale x 100 (0: the screen's size)
+- (void)setUpscaleMax:(NSMenuItem *)s {
+    NSString *v = [NSString stringWithFormat:@"%g", s.tag / 100.0];
+    bdsp_set_upscale_max((float)(s.tag / 100.0));
+    [[NSUserDefaults standardUserDefaults] setObject:v forKey:@"bdsp_upscale_max"];
+    setenv("BDSP_UPSCALE_MAX", v.UTF8String, 1);
+}
+// View > Frame Generation: the game at half the frame rate, MetalFX makes the picture in between (macOS 26)
+- (void)toggleFramegen:(NSMenuItem *)s {
+    int on = !bdsp_framegen();
+    bdsp_set_framegen(on);
+    [[NSUserDefaults standardUserDefaults] setObject:on ? @"on" : @"off" forKey:@"bdsp_framegen"];
+    setenv("BDSP_FRAMEGEN", on ? "on" : "off", 1);
 }
 - (void)setFps:(NSMenuItem *)s {
     bdsp_set_fps((int)s.tag);
@@ -374,6 +393,12 @@ void bdsp_app_apply_display_defaults(void) {
     if (item.action == @selector(setDisplayPref:))
         item.state = [item.representedObject isEqualToString:display_pref_current(item.tag == 1)] ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(setUpscaler:)) item.state = item.tag == bdsp_upscaler() ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(setUpscaleMax:)) item.state = item.tag == lroundf(bdsp_upscale_max() * 100) ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(toggleFramegen:)) {
+        extern int metal_framegen_available(void);
+        item.state = bdsp_framegen() ? NSControlStateValueOn : NSControlStateValueOff;
+        return metal_framegen_available();
+    }
     if (item.action == @selector(setFps:)) item.state = item.tag == g_bdsp_fps ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(toggleMetalHud:)) item.state = [[NSUserDefaults standardUserDefaults] boolForKey:@"bdsp_metal_hud"] ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(selectAppIcon:)) {
@@ -492,6 +517,12 @@ static void install_menu(void) {
     item(um, L("Off"), @selector(setUpscaler:), @"", 0, g_target).tag = 0;
     item(um, L("MetalFX Spatial"), @selector(setUpscaler:), @"", 0, g_target).tag = 1;
     item(um, L("MetalFX Temporal"), @selector(setUpscaler:), @"", 0, g_target).tag = 2;
+    [um addItem:[NSMenuItem separatorItem]];
+    [um addItemWithTitle:L("Temporal Output") action:nil keyEquivalent:@""].enabled = NO;
+    item(um, L("Screen Size"), @selector(setUpscaleMax:), @"", 0, g_target).tag = 0;
+    item(um, L("1.5 × Render Size"), @selector(setUpscaleMax:), @"", 0, g_target).tag = 150;
+    item(um, L("Render Size (Anti-Aliasing Only)"), @selector(setUpscaleMax:), @"", 0, g_target).tag = 100;
+    item(vm, L("Frame Generation"), @selector(toggleFramegen:), @"", 0, g_target);
     [vm addItem:[NSMenuItem separatorItem]];
     static const int sizes[4][2] = {{960, 540}, {1280, 720}, {1920, 1080}, {2560, 1440}};
     for (int i = 0; i < 4; i++) {

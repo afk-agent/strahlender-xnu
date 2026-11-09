@@ -51,6 +51,18 @@ static void audio_output_set_active(int active) { (void)active; }
 static int bdsp_guest_window_error;
 #endif
 extern void bdsp_set_fps(int fps);   // services_gfx.c: 30, 60 or 120
+extern void bdsp_set_upscaler(int mode);       // runtime/nvn/nvn_glue.c: 0 off, 1 MetalFX spatial, 2 temporal
+extern void bdsp_set_upscale_max(float m);     // temporal output cap (0: the screen's size)
+extern void bdsp_set_framegen(int on);         // frame generation
+// Settings > BDSP > Picture: the upscaler, its temporal output size and frame generation apply when the app comes back from the Settings
+// app (the render size and aspect need a restart: the game reads them when it starts).
+static void ApplyPictureSettings(void) {
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    NSString *u = [d stringForKey:@"bdsp_upscaler"], *m = [d stringForKey:@"bdsp_upscale_max"];
+    if (u.length) bdsp_set_upscaler([u isEqualToString:@"temporal"] ? 2 : [u isEqualToString:@"metalfx"] ? 1 : 0);
+    if (m.length) bdsp_set_upscale_max((float)m.doubleValue);
+    if ([d objectForKey:@"bdsp_framegen"]) bdsp_set_framegen([d boolForKey:@"bdsp_framegen"]);
+}
 extern CAMetalLayer *g_ios_layer;
 
 static double FootprintMiB(void);
@@ -700,6 +712,10 @@ static void StartSelectedRuntime(const ModInfo *mod) {
         if (height.length) setenv("BDSP_RENDER_H", height.UTF8String, 0);
         NSString *upscaler = [NSUserDefaults.standardUserDefaults stringForKey:@"bdsp_upscaler"];   // MetalFX (runtime/nvn/nvn_glue.c settings_load)
         if (upscaler.length) setenv("BDSP_UPSCALER", upscaler.UTF8String, 0);
+        NSString *umax = [NSUserDefaults.standardUserDefaults stringForKey:@"bdsp_upscale_max"];   // temporal output cap, frame generation
+        if (umax.length) setenv("BDSP_UPSCALE_MAX", umax.UTF8String, 0);
+        if ([NSUserDefaults.standardUserDefaults objectForKey:@"bdsp_framegen"])
+            setenv("BDSP_FRAMEGEN", [NSUserDefaults.standardUserDefaults boolForKey:@"bdsp_framegen"] ? "on" : "off", 0);
     }
     fprintf(stderr, "[ipad] Start: %s, device %s, os_proc_available_memory %zu MiB\n", UIDevice.currentDevice.systemVersion.UTF8String,
             UIDevice.currentDevice.model.UTF8String, os_proc_available_memory() >> 20);
@@ -841,6 +857,7 @@ static void StartRuntime(void) {
     fprintf(stderr, "[ipad-audio] scene became active: audio %s\n", audioInterrupted ? "stays off (interrupted)" : "on");
     if (!audioInterrupted) SetAudioActive(YES);
     ApplyAppIcon();
+    ApplyPictureSettings();
 }
 - (void)startRuntime {
     if (bdsp_guest_window_error) {

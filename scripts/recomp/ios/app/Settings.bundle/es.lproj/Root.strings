@@ -1,7 +1,7 @@
 /* Settings.bundle, español (también para es-419 y otras regiones) */
 "FPS_GROUP" = "Pantalla";
 "FPS_TITLE" = "Tasa de fotogramas";
-"FPS_FOOTER" = "Tasa de fotogramas de la emulación. Se aplica al reiniciar la app. Predeterminado: 60 fps. 120 fps requiere una pantalla de 120 Hz.";
+"FPS_FOOTER" = "Tasa de fotogramas de la emulación. Se aplica al reiniciar la app. Predeterminado: 60 fps. 120 fps requiere una pantalla de 120 Hz. Generación de fotogramas (iPadOS 26): el juego va a la mitad de fotogramas y MetalFX crea uno de cada dos; menos calor, algo más de retraso de entrada.";
 "FPS_30" = "30 fps";
 "FPS_60" = "60 fps";
 "FPS_120" = "120 fps";
@@ -20,7 +20,7 @@
 "NOTIFY_WARNINGS" = "Avisos de partidas y copias";
 "NOTIFY_VERIFICATION" = "Estado de verificación completa";
 "ASPECT_GROUP" = "Imagen";
-"ASPECT_FOOTER" = "Relación de aspecto y resolución de renderizado del juego. El juego dibuja de forma nativa con esta forma, sin estirar ni recortar. «Forma de pantalla» se ajusta exactamente a este dispositivo; «Nativa» renderiza con la altura en píxeles de la pantalla (más pesado). Se aplica al reiniciar la app. Predeterminado: 16:9, 1080p. Escalado: MetalFX enfoca la imagen cuando la altura de renderizado es menor que la de la pantalla (720p o 1080p en un iPad). MetalFX temporal combina varios fotogramas: más nítido y sin dientes de sierra (720p se acerca a 1080p), con más carga de GPU.";
+"ASPECT_FOOTER" = "Relación de aspecto y resolución de renderizado del juego. El juego dibuja de forma nativa con esta forma, sin estirar ni recortar. «Forma de pantalla» se ajusta exactamente a este dispositivo; «Nativa» renderiza con la altura en píxeles de la pantalla (más pesado). Se aplica al reiniciar la app. Predeterminado: 16:9, 1080p. Escalado: MetalFX enfoca la imagen cuando la altura de renderizado es menor que la de la pantalla (720p o 1080p en un iPad). MetalFX temporal combina varios fotogramas: más nítido y sin dientes de sierra (720p se acerca a 1080p), con más carga de GPU. Salida temporal: un tamaño menor cuesta menos tiempo de GPU.";
 "ASPECT_TITLE" = "Relación de aspecto";
 "ASPECT_169" = "16:9 (original)";
 "ASPECT_AUTO" = "Forma de pantalla";
@@ -37,3 +37,8 @@
 "UPSCALER_OFF" = "Desactivado (bilineal)";
 "UPSCALER_METALFX" = "MetalFX espacial";
 "UPSCALER_TEMPORAL" = "MetalFX temporal";
+"FRAMEGEN_TITLE" = "Generación de fotogramas";
+"UPSCALE_MAX_TITLE" = "Salida temporal";
+"UPSCALE_MAX_FULL" = "Tamaño de pantalla";
+"UPSCALE_MAX_15" = "1,5 × tamaño de renderizado";
+"UPSCALE_MAX_1" = "Tamaño de renderizado (solo suavizado)";

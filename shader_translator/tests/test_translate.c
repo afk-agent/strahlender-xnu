@@ -345,6 +345,20 @@ static void test_motion_variants(void) {
     if (!sampled) fprintf(stderr, "note: test_motion_variants: the TEXS word did not decode as a sample\n");
     maxwell_free(s);
     free(b);
+    // previous-frame attributes (GPU-skinned vertices): a vertex shader reading generic input 0 gets attribute 16 for the second run
+    const uint64_t ald = 0xefd800000007ff03ull | (0x80ull << 20);
+    const uint64_t vs_attr[] = {W_SCHED, ald, W_EXIT, W_BRA_SELF_8};
+    b = make_blob(vs_attr, 4, &size, 1);
+    key = (ShaderKey){0};
+    key.no_rscale = true;
+    key.motion = 1;
+    key.motion_prev_attrs = 1 | 2;   // (attribute 1 is not read: not emitted)
+    s = maxwell_translate(b, size, STAGE_VERTEX, &key);
+    CHECK(s->msl && s->motion_prev_attrs == 1);
+    CHECK(s->msl && strstr(s->msl, "float4 p0 [[attribute(16)]];") && !strstr(s->msl, "p1 [[attribute"));
+    CHECK(s->msl && strstr(s->msl, "pin.a0 = in.p0;") && strstr(s->msl, "float4 prev = vs_body(pin, vid, iid"));
+    maxwell_free(s);
+    free(b);
 }
 
 // ---------------------------------------------------------------- container

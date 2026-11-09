@@ -215,7 +215,10 @@ Every build renders at any aspect ratio natively (no stretching, no cropped area
 ## 9. Temporal upscaling (MetalFX)
 
 `upscaler = temporal` (menu View > Upscaler > MetalFX Temporal on the Mac, effective at once; Settings > BDSP > Picture > Upscaler on
-iPhone/iPad, after a restart; `BDSP_UPSCALER=temporal`) runs Apple's MetalFX temporal scaler on the presented image. The 3D scene is drawn
+iPhone/iPad, applied when the app comes back from the Settings app; `BDSP_UPSCALER=temporal`) runs Apple's MetalFX temporal scaler on the
+presented image. **Temporal output** (`upscale_max`, View > Upscaler > Temporal Output, Settings > Temporal output, `BDSP_UPSCALE_MAX`):
+screen size (default), 1.5 x or 1 x the render size; the present pass stretches the rest bilinearly. The scaler's cost follows its output
+(section below), so 1.5 x or 1 x is the setting for a small GPU. The 3D scene is drawn
 with a different sub-pixel offset every frame and the scaler combines the frames, so a 720p render gives a picture close to a native
 1080p one, anti-aliased; with a window no larger than the render image it is anti-aliasing only (scale 1). The Vulkan backend ignores it.
 
@@ -226,12 +229,15 @@ with a different sub-pixel offset every frame and the scaler combines the frames
 |---|---|
 | Jitter | Draws that test depth (compare function other than "always") against a depth target of the presented image's size get a vertex shader variant that moves the position by the frame's offset (Halton 2,3; 8 phases times the square of the scale, at most 64): the depth pre-pass, opaque and transparent geometry. Full-screen passes, shadow maps (4096x4096) and post-processing targets are not jittered. |
 | Motion | The same variant runs the translated shader a second time with the previous frame's constant buffers and writes both clip positions; an opaque draw in a pass whose colour target has the presented size writes previous - current (uv units) into an extra RG16Float attachment (multisampled in the 4x MSAA cutscene passes, resolved). Previous contents are copies taken when a jittered draw used a buffer, per guest address and version within the frame: Unity keeps camera and object data at fixed addresses (the bedroom: 99.9 % of buffers found, about 75 KB copied per frame). |
+| Skinned motion | Characters are skinned by compute dispatches every frame. A compute range that jittered draws read as a vertex stream is learned; before the next frame's dispatch overwrites it, a blit copies it (the previous frame's vertices, about 48 KB for the player) and the second run reads its attributes from the copy (translator key `motion_prev_attrs`, attributes 16 + i at buffer 13). Not on devices below 5 GB, whose compute writes go through the arena. `BDSP_TAA_SKIN=0` turns it off. |
 | Depth | The depth target of the passes that wrote motion (reversed Z: the game clears it to 0). |
 | Reactive mask | The presented image is copied before the first draw over the scene's composite (HUD, text, menus); pixels that differ from the copy follow the current frame. |
 | Texture detail | Fragment shaders of jittered draws sample textures with a level-of-detail bias of log2(render / output) (-1 at 2x; `BDSP_TAA_LOD_BIAS=0` turns it off): without it textures keep the render resolution's mip levels and the result is soft. |
 
 The scene's targets are upside down relative to the presented image (Unity's render-texture convention; its final blit turns them), so a
-compute pass at the present turns motion and depth and builds the mask (`BDSP_TAA_FLIP=0` if a scene is ever drawn the other way). A frame
+compute pass at the present turns motion and depth and builds the mask. The orientation is checked as the game runs: every 30th frame the
+brightness of the scene's target and the image before the HUD is correlated on a 48 x 27 grid both ways (in the bedroom: 1.00 turned,
+0.2-0.7 as drawn; non-finite HDR pixels are skipped) and a score decides (`BDSP_TAA_FLIP=0/1` fixes it). A frame
 without motion (no 3D scene) drops the history. The scaler's conventions (jitter offset = the content's shift in pixels, motion = previous
 - current) are measured by `runtime/test/metalfx_temporal_conv_test.m` (in `run_metalfx_test.sh`) and were checked in the game: reversing
 either axis of the jitter costs 2-3 dB against a native image, both 6 dB.
@@ -252,8 +258,38 @@ scaler: 0.9-1.5 ms); the motion attachment, the second vertex run and the prepar
 runs at about 39 fps (GPU-bound): on that GPU use a 720p render. Walking (camera and character moving) shows no trails; the HUD and menus
 stay clean. Metal's validation layer reports nothing with it on (walking, menu, the 4x MSAA intro).
 
-**Not covered / open:** characters skinned on the GPU each frame move only with their object matrix (their limbs' own motion is not in
-the motion texture; MetalFX's history check keeps it clean in the tests above); battles and the overworld outside the first house were
-not tested (no save there); the iPad build is syntax-checked only. MetalFX writes its compiled scaler through `TMPDIR`: a run with a
-relative `TMPDIR` aborted inside MetalFX (a test setup error, not something a user's environment has). `BDSP_TAA_LOG=1` logs the jitter,
-the number of jittered draws and motion draws, and vertex shaders that could not get the variant.
+**Memory.** The temporal scaler takes about 52 bytes per output pixel (M1: 163 MB for 720p to an 11" iPad's 2360x1328, 182 MB to
+2560x1440), the frame interpolator about 57 bytes per input pixel (52 MB at 720p). On iPhone/iPad either is set up only with that much plus
+384 MB left below the app's limit (`os_proc_available_memory`; otherwise the cheaper path stays and the log says why), and every effect
+that is switched off gives its memory back (the renderer's motion textures and copies after a second).
+
+**First use.** The temporal variants compile in the background, one at a time; a draw uses the game's own program until its variant is
+ready (no stall when a new area appears; those draws are unjittered for a few frames).
+
+**Not covered / open:** battles, the Pokémon menus (3D models drawn through the UI) and the overworld outside the first house were not
+tested (no save there); the iPad build is syntax-checked only. MetalFX writes its compiled scaler through `TMPDIR`: a run with a relative
+`TMPDIR` aborted inside MetalFX (a test setup error, not something a user's environment has). `BDSP_TAA_LOG=1` logs the jitter, the number
+of jittered, motion and skinned draws, the orientation checks, and vertex shaders that could not get the variant.
+
+## 10. Frame generation (MetalFX, macOS / iOS 26)
+
+`framegen = on` (View > Frame Generation on the Mac, Settings > BDSP > Display > Frame generation on iPhone/iPad, `BDSP_FRAMEGEN=on`) runs
+the game at half the frame rate setting (30 for 60, 60 for 120: the vsync event and the frame pacer use half) and Apple's frame interpolator
+makes the picture between two game frames (`nvn/src/nvn/metalfx_interp.h`). At each present the generated picture goes to one drawable at
+once, the game's frame to a second drawable half a game frame later (`presentDrawable:afterMinimumDuration:`). It works with every upscaler
+setting: without the temporal one it interpolates the game's image at the render size and both pictures then go through the same spatial
+step; with it, it interpolates the temporal output (so `upscale_max` limits its cost too). The inputs are the temporal path's (section 9:
+motion, depth, skinned motion; the renderer records them for frame generation alone, without jitter), with the motion set to zero where the
+HUD is, so menus and text stay in place. A frame after a scene cut or without motion is shown alone (no picture is generated).
+
+| Measured (M1, bedroom, 720p, walking) | Normal 60 fps | Frame generation (30 + 30) |
+|---|---|---|
+| Summed GPU time of the game's work per 5 s | ~9.2 s | ~4.6 s (+ the interpolation, 6 ms per picture at 720p) |
+| Processor, one core | 69 % | 65 % |
+
+The processor's share hardly depends on the frame rate here (65 % at a plain 30 fps cap, 67 % standing still): the saving is GPU time.
+The interpolation costs 6 ms per 1280x720 picture on an M1, 12 ms at 1920x1080, 19 ms at 2560x1440 (`runtime/test/metalfx_interp_test.m`,
+which also measures that the picture sits at the midpoint), so with the temporal upscaler use a smaller temporal output. A generated
+picture is a real in-between frame (objects at their middle position, not a blend of two); uncovered background shows a small fringe at
+edges. One frame more delay between input and picture. `BDSP_FG_SHOT=<frame>:<path>` saves a generated picture. Pacing on a real display
+was not measured (headless runs present nothing): watch for uneven motion.
