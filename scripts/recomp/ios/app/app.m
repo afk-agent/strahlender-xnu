@@ -56,12 +56,27 @@ extern void bdsp_set_upscale_max(float m);     // temporal output cap (0: the sc
 extern void bdsp_set_framegen(int on);         // frame generation
 // Settings > BDSP > Picture: the upscaler, its temporal output size and frame generation apply when the app comes back from the Settings
 // app (the render size and aspect need a restart: the game reads them when it starts).
+static NSString *gStartSize;   // aspect and render height this run started with (nil: the game has not started)
+static NSString *PictureSize(void) {
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    return [NSString stringWithFormat:@"%@ %@", [d stringForKey:@"bdsp_aspect"] ?: @"", [d stringForKey:@"bdsp_render_h"] ?: @""];
+}
+static void ShowRestartNotice(void);
 static void ApplyPictureSettings(void) {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
     NSString *u = [d stringForKey:@"bdsp_upscaler"], *m = [d stringForKey:@"bdsp_upscale_max"];
     if (u.length) bdsp_set_upscaler([u isEqualToString:@"temporal"] ? 2 : [u isEqualToString:@"metalfx"] ? 1 : 0);
     if (m.length) bdsp_set_upscale_max((float)m.doubleValue);
     if ([d objectForKey:@"bdsp_framegen"]) bdsp_set_framegen([d boolForKey:@"bdsp_framegen"]);
+    // Returning from the Settings app resumes the running game, which keeps the size it started with: say so once per change, otherwise
+    // a new render height looks applied (the upscaler beside it is) while the game still draws the old one.
+    static NSString *noticed;
+    NSString *now = PictureSize();
+    if (gStartSize && ![now isEqualToString:gStartSize] && ![now isEqualToString:noticed]) {
+        noticed = now;
+        fprintf(stderr, "[ipad] render size setting changed (%s -> %s): applies after a restart\n", gStartSize.UTF8String, now.UTF8String);
+        ShowRestartNotice();
+    }
 }
 extern CAMetalLayer *g_ios_layer;
 
@@ -587,6 +602,16 @@ static void *RuntimeThread(void *arg) {
     return NULL;
 }
 
+static void ShowRestartNotice(void) {
+    UIViewController *vc = gView.window.rootViewController;
+    if (!vc || vc.presentedViewController) return;
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Restart to change the resolution"
+        message:@"The game keeps the resolution and aspect ratio it started with. To use the new ones, close BDSP in the app switcher (swipe it up) and open it again. Upscaler and frame generation changes are already applied."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [vc presentViewController:a animated:YES completion:nil];
+}
+
 @implementation AppDelegate
 - (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)opts {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -710,6 +735,7 @@ static void StartSelectedRuntime(const ModInfo *mod) {
         NSString *height = [NSUserDefaults.standardUserDefaults stringForKey:@"bdsp_render_h"];
         if (aspect.length) setenv("BDSP_ASPECT", aspect.UTF8String, 0);
         if (height.length) setenv("BDSP_RENDER_H", height.UTF8String, 0);
+        gStartSize = PictureSize();
         NSString *upscaler = [NSUserDefaults.standardUserDefaults stringForKey:@"bdsp_upscaler"];   // MetalFX (runtime/nvn/nvn_glue.c settings_load)
         if (upscaler.length) setenv("BDSP_UPSCALER", upscaler.UTF8String, 0);
         NSString *umax = [NSUserDefaults.standardUserDefaults stringForKey:@"bdsp_upscale_max"];   // temporal output cap, frame generation
